@@ -3065,6 +3065,7 @@ static void warnAboutAmbiguousFunction(Sema &S, Declarator &D,
         S.Diag(D.getCommaLoc(), diag::note_empty_parens_function_call)
           << FixItHint::CreateReplacement(D.getCommaLoc(), ";")
           << D.getIdentifier();
+      Result.suppressDiagnostics();
     }
   }
 
@@ -3104,6 +3105,99 @@ static void warnAboutAmbiguousFunction(Sema &S, Declarator &D,
           << FixItHint::CreateReplacement(ParenRange, Init);
     }
   }
+}
+
+/// Produce an appropriate diagnostic for a declarator with top-level
+/// parentheses.
+static void warnAboutRedundantParens(Sema &S, Declarator &D, QualType T) {
+  DeclaratorChunk &Paren = D.getTypeObject(D.getNumTypeObjects() - 1);
+  assert(Paren.Kind == DeclaratorChunk::Paren &&
+         "do not have redundant top-level parentheses");
+
+  // This is a syntactic check; we're not interested in cases that arise
+  // during template instantiation.
+  if (S.inTemplateInstantiation())
+    return;
+
+  // Check whether this could be intended to be a construction of a temporary
+  // object in C++ via a function-style cast.
+  bool CouldBeTemporaryObject =
+      S.getLangOpts().CPlusPlus && D.isExpressionContext() &&
+      !D.isInvalidType() && D.getIdentifier() &&
+      D.getDeclSpec().getParsedSpecifiers() == DeclSpec::PQ_TypeSpecifier &&
+      (T->isRecordType() || T->isDependentType()) &&
+      D.getDeclSpec().getTypeQualifiers() == 0 && D.isFirstDeclarator();
+
+  for (auto &C : D.type_objects()) {
+    switch (C.Kind) {
+    case DeclaratorChunk::Pointer:
+    case DeclaratorChunk::Paren:
+      continue;
+
+    case DeclaratorChunk::Array:
+      if (!C.Arr.NumElts)
+        CouldBeTemporaryObject = false;
+      continue;
+
+    case DeclaratorChunk::Reference:
+      // FIXME: Suppress the warning here if there is no initializer; we're
+      // going to give an error anyway.
+      // We assume that something like 'T (&x) = y;' is highly likely to not
+      // be intended to be a temporary object.
+      CouldBeTemporaryObject = false;
+      continue;
+
+    case DeclaratorChunk::Function:
+      // In a new-type-id, function chunks require parentheses.
+      if (D.getContext() == Declarator::CXXNewContext)
+        return;
+      LLVM_FALLTHROUGH;
+    case DeclaratorChunk::BlockPointer:
+    case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::Pipe:
+      // These cannot appear in expressions.
+      CouldBeTemporaryObject = false;
+      continue;
+    }
+  }
+
+  // FIXME: If there is an initializer, assume that this is not intended to be
+  // a construction of a temporary object.
+
+  // Check whether the name has already been declared; if not, this is not a
+  // function-style cast.
+  if (CouldBeTemporaryObject) {
+    LookupResult Result(S, D.getIdentifier(), SourceLocation(),
+                        Sema::LookupOrdinaryName);
+    if (!S.LookupName(Result, S.getCurScope()))
+      CouldBeTemporaryObject = false;
+    Result.suppressDiagnostics();
+  }
+
+  SourceRange ParenRange(Paren.Loc, Paren.EndLoc);
+
+  if (!CouldBeTemporaryObject) {
+    S.Diag(Paren.Loc, diag::warn_redundant_parens_around_declarator)
+        << ParenRange << FixItHint::CreateRemoval(Paren.Loc)
+        << FixItHint::CreateRemoval(Paren.EndLoc);
+    return;
+  }
+
+  S.Diag(Paren.Loc, diag::warn_parens_disambiguated_as_variable_declaration)
+      << ParenRange << D.getIdentifier();
+  auto *RD = T->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition() || RD->hasNonTrivialDestructor())
+    S.Diag(Paren.Loc, diag::note_raii_guard_add_name)
+        << FixItHint::CreateInsertion(Paren.Loc, " varname") << T
+        << D.getIdentifier();
+  // FIXME: A cast to void is probably a better suggestion in cases where it's
+  // valid (when there is no initializer and we're not in a condition).
+  S.Diag(D.getLocStart(), diag::note_function_style_cast_add_parentheses)
+      << FixItHint::CreateInsertion(D.getLocStart(), "(")
+      << FixItHint::CreateInsertion(S.getLocForEndOfToken(D.getLocEnd()), ")");
+  S.Diag(Paren.Loc, diag::note_remove_parens_for_variable_declaration)
+      << FixItHint::CreateRemoval(Paren.Loc)
+      << FixItHint::CreateRemoval(Paren.EndLoc);
 }
 
 /// Helper for figuring out the default CC for a function declarator type.  If
@@ -3500,7 +3594,8 @@ static void fixItNullability(Sema &S, DiagnosticBuilder &Diag,
 
 static void emitNullabilityConsistencyWarning(Sema &S,
                                               SimplePointerKind PointerKind,
-                                              SourceLocation PointerLoc) {
+                                              SourceLocation PointerLoc,
+                                              SourceLocation PointerEndLoc) {
   assert(PointerLoc.isValid());
 
   if (PointerKind == SimplePointerKind::Array) {
@@ -3510,14 +3605,15 @@ static void emitNullabilityConsistencyWarning(Sema &S,
       << static_cast<unsigned>(PointerKind);
   }
 
-  if (PointerLoc.isMacroID())
+  auto FixItLoc = PointerEndLoc.isValid() ? PointerEndLoc : PointerLoc;
+  if (FixItLoc.isMacroID())
     return;
 
   auto addFixIt = [&](NullabilityKind Nullability) {
-    auto Diag = S.Diag(PointerLoc, diag::note_nullability_fix_it);
+    auto Diag = S.Diag(FixItLoc, diag::note_nullability_fix_it);
     Diag << static_cast<unsigned>(Nullability);
     Diag << static_cast<unsigned>(PointerKind);
-    fixItNullability(S, Diag, PointerLoc, Nullability);
+    fixItNullability(S, Diag, FixItLoc, Nullability);
   };
   addFixIt(NullabilityKind::Nullable);
   addFixIt(NullabilityKind::NonNull);
@@ -3529,9 +3625,10 @@ static void emitNullabilityConsistencyWarning(Sema &S,
 ///
 /// If the file has \e not seen other uses of nullability, this particular
 /// pointer is saved for possible later diagnosis. See recordNullabilitySeen().
-static void checkNullabilityConsistency(Sema &S,
-                                        SimplePointerKind pointerKind,
-                                        SourceLocation pointerLoc) {
+static void
+checkNullabilityConsistency(Sema &S, SimplePointerKind pointerKind,
+                            SourceLocation pointerLoc,
+                            SourceLocation pointerEndLoc = SourceLocation()) {
   // Determine which file we're performing consistency checking for.
   FileID file = getNullabilityCompletenessCheckFileID(S, pointerLoc);
   if (file.isInvalid())
@@ -3552,6 +3649,7 @@ static void checkNullabilityConsistency(Sema &S,
     if (fileNullability.PointerLoc.isInvalid() &&
         !S.Context.getDiagnostics().isIgnored(diagKind, pointerLoc)) {
       fileNullability.PointerLoc = pointerLoc;
+      fileNullability.PointerEndLoc = pointerEndLoc;
       fileNullability.PointerKind = static_cast<unsigned>(pointerKind);
     }
 
@@ -3559,7 +3657,7 @@ static void checkNullabilityConsistency(Sema &S,
   }
 
   // Complain about missing nullability.
-  emitNullabilityConsistencyWarning(S, pointerKind, pointerLoc);
+  emitNullabilityConsistencyWarning(S, pointerKind, pointerLoc, pointerEndLoc);
 }
 
 /// Marks that a nullability feature has been used in the file containing
@@ -3585,7 +3683,8 @@ static void recordNullabilitySeen(Sema &S, SourceLocation loc) {
     return;
 
   auto kind = static_cast<SimplePointerKind>(fileNullability.PointerKind);
-  emitNullabilityConsistencyWarning(S, kind, fileNullability.PointerLoc);
+  emitNullabilityConsistencyWarning(S, kind, fileNullability.PointerLoc,
+                                    fileNullability.PointerEndLoc);
 }
 
 /// Returns true if any of the declarator chunks before \p endIndex include a
@@ -3895,6 +3994,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
   // Returns true if _Nonnull was inferred.
   auto inferPointerNullability = [&](SimplePointerKind pointerKind,
                                      SourceLocation pointerLoc,
+                                     SourceLocation pointerEndLoc,
                                      AttributeList *&attrs) -> AttributeList * {
     // We've seen a pointer.
     if (NumPointersRemaining > 0)
@@ -3950,7 +4050,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       // Fallthrough.
 
     case CAMN_Yes:
-      checkNullabilityConsistency(S, pointerKind, pointerLoc);
+      checkNullabilityConsistency(S, pointerKind, pointerLoc, pointerEndLoc);
     }
     return nullptr;
   };
@@ -3973,6 +4073,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
 
         if (auto *attr = inferPointerNullability(
               pointerKind, D.getDeclSpec().getTypeSpecTypeLoc(),
+              D.getDeclSpec().getLocEnd(),
               D.getMutableDeclSpec().getAttributes().getListRef())) {
           T = Context.getAttributedType(
                 AttributedType::getNullabilityAttrKind(*inferNullability),T,T);
@@ -4000,6 +4101,8 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
     IsQualifiedFunction &= DeclType.Kind == DeclaratorChunk::Paren;
     switch (DeclType.Kind) {
     case DeclaratorChunk::Paren:
+      if (i == 0)
+        warnAboutRedundantParens(S, D, T);
       T = S.BuildParenType(T);
       break;
     case DeclaratorChunk::BlockPointer:
@@ -4008,8 +4111,8 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         S.Diag(DeclType.Loc, diag::err_blocks_disable) << LangOpts.OpenCL;
 
       // Handle pointer nullability.
-      inferPointerNullability(SimplePointerKind::BlockPointer,
-                              DeclType.Loc, DeclType.getAttrListRef());
+      inferPointerNullability(SimplePointerKind::BlockPointer, DeclType.Loc,
+                              DeclType.EndLoc, DeclType.getAttrListRef());
 
       T = S.BuildBlockPointerType(T, D.getIdentifierLoc(), Name);
       if (DeclType.Cls.TypeQuals || LangOpts.OpenCL) {
@@ -4031,7 +4134,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
 
       // Handle pointer nullability
       inferPointerNullability(SimplePointerKind::Pointer, DeclType.Loc,
-                              DeclType.getAttrListRef());
+                              DeclType.EndLoc, DeclType.getAttrListRef());
 
       if (LangOpts.ObjC1 && T->getAs<ObjCObjectType>()) {
         T = Context.getObjCObjectPointerType(T);
@@ -4530,8 +4633,8 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       QualType ClsType;
 
       // Handle pointer nullability.
-      inferPointerNullability(SimplePointerKind::MemberPointer,
-                              DeclType.Loc, DeclType.getAttrListRef());
+      inferPointerNullability(SimplePointerKind::MemberPointer, DeclType.Loc,
+                              DeclType.EndLoc, DeclType.getAttrListRef());
 
       if (SS.isInvalid()) {
         // Avoid emitting extra errors if we already errored on the scope.
@@ -7309,11 +7412,15 @@ bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
 
     // Give the external AST source a chance to complete the type.
     if (auto *Source = Context.getExternalSource()) {
-      if (Tag)
-        Source->CompleteType(Tag->getDecl());
-      else
-        Source->CompleteType(IFace->getDecl());
-
+      if (Tag) {
+        TagDecl *TagD = Tag->getDecl();
+        if (TagD->hasExternalLexicalStorage())
+          Source->CompleteType(TagD);
+      } else {
+        ObjCInterfaceDecl *IFaceD = IFace->getDecl();
+        if (IFaceD->hasExternalLexicalStorage())
+          Source->CompleteType(IFace->getDecl());
+      }
       // If the external source completed the type, go through the motions
       // again to ensure we're allowed to use the completed type.
       if (!T->isIncompleteType())

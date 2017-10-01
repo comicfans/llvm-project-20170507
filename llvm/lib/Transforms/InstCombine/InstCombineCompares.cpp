@@ -1646,7 +1646,7 @@ Instruction *InstCombiner::foldICmpAndConstConst(ICmpInst &Cmp,
   if (!match(And->getOperand(1), m_APInt(C2)))
     return nullptr;
 
-  if (!And->hasOneUse() || !And->getOperand(0)->hasOneUse())
+  if (!And->hasOneUse())
     return nullptr;
 
   // If the LHS is an 'and' of a truncate and we can widen the and/compare to
@@ -1658,7 +1658,7 @@ Instruction *InstCombiner::foldICmpAndConstConst(ICmpInst &Cmp,
   // set or if it is an equality comparison. Extending a relational comparison
   // when we're checking the sign bit would not work.
   Value *W;
-  if (match(And->getOperand(0), m_Trunc(m_Value(W))) &&
+  if (match(And->getOperand(0), m_OneUse(m_Trunc(m_Value(W)))) &&
       (Cmp.isEquality() || (!C1->isNegative() && !C2->isNegative()))) {
     // TODO: Is this a good transform for vectors? Wider types may reduce
     // throughput. Should this transform be limited (even for scalars) by using
@@ -1680,7 +1680,7 @@ Instruction *InstCombiner::foldICmpAndConstConst(ICmpInst &Cmp,
   // (icmp pred (and A, (or (shl 1, B), 1), 0))
   //
   // iff pred isn't signed
-  if (!Cmp.isSigned() && C1->isNullValue() &&
+  if (!Cmp.isSigned() && C1->isNullValue() && And->getOperand(0)->hasOneUse() &&
       match(And->getOperand(1), m_One())) {
     Constant *One = cast<Constant>(And->getOperand(1));
     Value *Or = And->getOperand(0);
@@ -1711,22 +1711,6 @@ Instruction *InstCombiner::foldICmpAndConstConst(ICmpInst &Cmp,
         Cmp.setOperand(0, NewAnd);
         return &Cmp;
       }
-    }
-  }
-
-  // (X & C2) > C1 --> (X & C2) != 0, if any bit set in (X & C2) will produce a
- // result greater than C1. Also handle (X & C2) < C1 --> (X & C2) == 0.
-  if (!C2->isNullValue()) {
-    unsigned NumTZ = C2->countTrailingZeros();
-    if (Cmp.getPredicate() == ICmpInst::ICMP_UGT &&
-        NumTZ >= C1->getActiveBits()) {
-      Constant *Zero = Constant::getNullValue(And->getType());
-      return new ICmpInst(ICmpInst::ICMP_NE, And, Zero);
-    }
-    if (Cmp.getPredicate() == ICmpInst::ICMP_ULT &&
-        NumTZ >= C1->ceilLogBase2()) {
-      Constant *Zero = Constant::getNullValue(And->getType());
-      return new ICmpInst(ICmpInst::ICMP_EQ, And, Zero);
     }
   }
 
@@ -4216,11 +4200,17 @@ Instruction *InstCombiner::foldICmpUsingKnownBits(ICmpInst &I) {
     if (Op1Min == Op0Max) // A <u B -> A != B if max(A) == min(B)
       return new ICmpInst(ICmpInst::ICMP_NE, Op0, Op1);
 
-    if (Op1Min == Op1Max) {
+    const APInt *CmpC;
+    if (match(Op1, m_APInt(CmpC))) {
       // A <u C -> A == C-1 if min(A)+1 == C
-      if (Op1Min == Op0Min + 1)
+      if (*CmpC == Op0Min + 1)
         return new ICmpInst(ICmpInst::ICMP_EQ, Op0,
-                            ConstantInt::get(Op0->getType(), Op1Min - 1));
+                            ConstantInt::get(Op1->getType(), *CmpC - 1));
+      // X <u C --> X == 0, if the number of zero bits in the bottom of X
+      // exceeds the log2 of C.
+      if (Op0Known.countMinTrailingZeros() >= CmpC->ceilLogBase2())
+        return new ICmpInst(ICmpInst::ICMP_EQ, Op0,
+                            Constant::getNullValue(Op1->getType()));
     }
     break;
   }
@@ -4232,40 +4222,50 @@ Instruction *InstCombiner::foldICmpUsingKnownBits(ICmpInst &I) {
     if (Op1Max == Op0Min) // A >u B -> A != B if min(A) == max(B)
       return new ICmpInst(ICmpInst::ICMP_NE, Op0, Op1);
 
-    if (Op1Min == Op1Max) {
+    const APInt *CmpC;
+    if (match(Op1, m_APInt(CmpC))) {
       // A >u C -> A == C+1 if max(a)-1 == C
-      if (Op1Min == Op0Max - 1)
+      if (*CmpC == Op0Max - 1)
         return new ICmpInst(ICmpInst::ICMP_EQ, Op0,
-                            ConstantInt::get(Op1->getType(), Op1Min + 1));
+                            ConstantInt::get(Op1->getType(), *CmpC + 1));
+      // X >u C --> X != 0, if the number of zero bits in the bottom of X
+      // exceeds the log2 of C.
+      if (Op0Known.countMinTrailingZeros() >= CmpC->getActiveBits())
+        return new ICmpInst(ICmpInst::ICMP_NE, Op0,
+                            Constant::getNullValue(Op1->getType()));
     }
     break;
   }
-  case ICmpInst::ICMP_SLT:
+  case ICmpInst::ICMP_SLT: {
     if (Op0Max.slt(Op1Min)) // A <s B -> true if max(A) < min(C)
       return replaceInstUsesWith(I, ConstantInt::getTrue(I.getType()));
     if (Op0Min.sge(Op1Max)) // A <s B -> false if min(A) >= max(C)
       return replaceInstUsesWith(I, ConstantInt::getFalse(I.getType()));
     if (Op1Min == Op0Max) // A <s B -> A != B if max(A) == min(B)
       return new ICmpInst(ICmpInst::ICMP_NE, Op0, Op1);
-    if (Op1Min == Op1Max) { // Constant RHS
-      if (Op1Min == Op0Min + 1) // A <s C -> A == C-1 if min(A)+1 == C
+    const APInt *CmpC;
+    if (match(Op1, m_APInt(CmpC))) {
+      if (*CmpC == Op0Min + 1) // A <s C -> A == C-1 if min(A)+1 == C
         return new ICmpInst(ICmpInst::ICMP_EQ, Op0,
-                            ConstantInt::get(Op1->getType(), Op1Min - 1));
+                            ConstantInt::get(Op1->getType(), *CmpC - 1));
     }
     break;
-  case ICmpInst::ICMP_SGT:
+  }
+  case ICmpInst::ICMP_SGT: {
     if (Op0Min.sgt(Op1Max)) // A >s B -> true if min(A) > max(B)
       return replaceInstUsesWith(I, ConstantInt::getTrue(I.getType()));
     if (Op0Max.sle(Op1Min)) // A >s B -> false if max(A) <= min(B)
       return replaceInstUsesWith(I, ConstantInt::getFalse(I.getType()));
     if (Op1Max == Op0Min) // A >s B -> A != B if min(A) == max(B)
       return new ICmpInst(ICmpInst::ICMP_NE, Op0, Op1);
-    if (Op1Min == Op1Max) { // Constant RHS
-      if (Op1Min == Op0Max - 1) // A >s C -> A == C+1 if max(A)-1 == C
+    const APInt *CmpC;
+    if (match(Op1, m_APInt(CmpC))) {
+      if (*CmpC == Op0Max - 1) // A >s C -> A == C+1 if max(A)-1 == C
         return new ICmpInst(ICmpInst::ICMP_EQ, Op0,
-                            ConstantInt::get(Op1->getType(), Op1Min + 1));
+                            ConstantInt::get(Op1->getType(), *CmpC + 1));
     }
     break;
+  }
   case ICmpInst::ICMP_SGE:
     assert(!isa<ConstantInt>(Op1) && "ICMP_SGE with ConstantInt not folded!");
     if (Op0Min.sge(Op1Max)) // A >=s B -> true if min(A) >= max(B)

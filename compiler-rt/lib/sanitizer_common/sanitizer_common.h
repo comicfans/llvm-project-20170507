@@ -128,6 +128,14 @@ void CheckVMASize();
 void RunMallocHooks(const void *ptr, uptr size);
 void RunFreeHooks(const void *ptr);
 
+typedef void (*fill_profile_f)(uptr start, uptr rss, bool file,
+                               /*out*/uptr *stats, uptr stats_size);
+
+// Parse the contents of /proc/self/smaps and generate a memory profile.
+// |cb| is a tool-specific callback that fills the |stats| array containing
+// |stats_size| elements.
+void GetMemoryProfile(fill_profile_f cb, uptr *stats, uptr stats_size);
+
 // InternalScopedBuffer can be used instead of large stack arrays to
 // keep frame size low.
 // FIXME: use InternalAlloc instead of MmapOrDie once
@@ -719,7 +727,7 @@ class LoadedModule {
 // filling this information.
 class ListOfModules {
  public:
-  ListOfModules() : modules_(kInitialCapacity) {}
+  ListOfModules() : initialized(false) {}
   ~ListOfModules() { clear(); }
   void init();
   const LoadedModule *begin() const { return modules_.begin(); }
@@ -737,10 +745,15 @@ class ListOfModules {
     for (auto &module : modules_) module.clear();
     modules_.clear();
   }
+  void clearOrInit() {
+    initialized ? clear() : modules_.Initialize(kInitialCapacity);
+    initialized = true;
+  }
 
-  InternalMmapVector<LoadedModule> modules_;
+  InternalMmapVectorNoCtor<LoadedModule> modules_;
   // We rarely have more than 16K loaded modules.
   static const uptr kInitialCapacity = 1 << 14;
+  bool initialized;
 };
 
 // Callback type for iterating over a set of memory ranges.

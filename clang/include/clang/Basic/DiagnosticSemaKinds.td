@@ -295,8 +295,20 @@ def warn_empty_parens_are_function_decl : Warning<
 def warn_parens_disambiguated_as_function_declaration : Warning<
   "parentheses were disambiguated as a function declaration">,
   InGroup<VexingParse>;
+def warn_parens_disambiguated_as_variable_declaration : Warning<
+  "parentheses were disambiguated as redundant parentheses around declaration "
+  "of variable named %0">, InGroup<VexingParse>;
+def warn_redundant_parens_around_declarator : Warning<
+  "redundant parentheses surrounding declarator">,
+  InGroup<DiagGroup<"redundant-parens">>, DefaultIgnore;
 def note_additional_parens_for_variable_declaration : Note<
   "add a pair of parentheses to declare a variable">;
+def note_raii_guard_add_name : Note<
+  "add a variable name to declare a %0 initialized with %1">;
+def note_function_style_cast_add_parentheses : Note<
+  "add enclosing parentheses to perform a function-style cast">;
+def note_remove_parens_for_variable_declaration : Note<
+  "remove parentheses to silence this warning">;
 def note_empty_parens_function_call : Note<
   "change this ',' to a ';' to call %0">;
 def note_empty_parens_default_ctor : Note<
@@ -1407,6 +1419,10 @@ def err_noexcept_needs_constant_expression : Error<
   "argument to noexcept specifier must be a constant expression">;
 def err_exception_spec_not_parsed : Error<
   "exception specification is not available until end of class definition">;
+def warn_nothrow_attr_disagrees_with_exception_specification
+    : ExtWarn<"attribute 'nothrow' ignored due to conflicting exception "
+              "specification">,
+      InGroup<IgnoredAttributes>;
 
 // C++ access checking
 def err_class_redeclared_with_different_access : Error<
@@ -2620,6 +2636,8 @@ def err_attribute_section_invalid_for_target : Error<
   "argument to 'section' attribute is not valid for this target: %0">;
 def warn_mismatched_section : Warning<
   "section does not match previous declaration">, InGroup<Section>;
+def warn_attribute_section_on_redeclaration : Warning<
+  "section attribute is specified on redeclared variable">, InGroup<Section>;
 
 def err_anonymous_property: Error<
   "anonymous property is not supported">;

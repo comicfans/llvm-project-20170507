@@ -119,7 +119,10 @@ class Symbolizer final {
   void AddHooks(StartSymbolizationHook start_hook,
                 EndSymbolizationHook end_hook);
 
+  void RefreshModules();
   const LoadedModule *FindModuleForAddress(uptr address);
+
+  void InvalidateModuleList();
 
  private:
   // GetModuleNameAndOffsetForPC has to return a string to the caller.

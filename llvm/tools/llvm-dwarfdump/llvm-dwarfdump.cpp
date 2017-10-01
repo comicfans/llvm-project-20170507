@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/DebugInfo/DIContext.h"
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
@@ -134,9 +135,20 @@ static list<std::string>
                      "name or by number. This option can be specified "
                      "multiple times, once for each desired architecture."),
                 cat(DwarfDumpCategory));
-static opt<bool> DumpUUID("uuid", desc("Show the UUID for each architecture"),
-                          cat(DwarfDumpCategory));
-static alias DumpUUIDAlias("u", desc("Alias for -uuid"), aliasopt(DumpUUID));
+static list<std::string>
+    Find("find",
+         desc("Search for the exact match for <name> in the accelerator tables "
+              "and print the matching debug information entries. When no "
+              "accelerator tables are available, the slower but more complete "
+              "-name option can be used instead."),
+         value_desc("name"), cat(DwarfDumpCategory));
+static alias FindAlias("f", desc("Alias for -find"), aliasopt(Find));
+static list<std::string>
+    Name("name",
+         desc("Find and print all debug info entries whose name (DW_AT_name "
+              "attribute) matches the exact text in <name>."),
+         value_desc("name"), cat(DwarfDumpCategory));
+static alias NameAlias("n", desc("Alias for -name"), aliasopt(Name));
 static opt<std::string>
     OutputFilename("out-file", cl::init(""),
                    cl::desc("Redirect output to the specified file"),
@@ -164,7 +176,7 @@ static opt<unsigned> RecurseDepth(
     cat(DwarfDumpCategory), init(-1U), value_desc("N"));
 static alias RecurseDepthAlias("r", desc("Alias for -recurse-depth"),
                                aliasopt(RecurseDepth));
-
+  
 static opt<bool>
     SummarizeTypes("summarize-types",
                    desc("Abbreviate the description of type unit entries"),
@@ -173,6 +185,9 @@ static opt<bool> Verify("verify", desc("Verify the DWARF debug info"),
                         cat(DwarfDumpCategory));
 static opt<bool> Quiet("quiet", desc("Use with -verify to not emit to STDOUT."),
                        cat(DwarfDumpCategory));
+static opt<bool> DumpUUID("uuid", desc("Show the UUID for each architecture"),
+                          cat(DwarfDumpCategory));
+static alias DumpUUIDAlias("u", desc("Alias for -uuid"), aliasopt(DumpUUID));
 static opt<bool> Verbose("verbose",
                          desc("Print more low-level encoding details"),
                          cat(DwarfDumpCategory));
@@ -214,12 +229,17 @@ static uint32_t getCPUType(MachOObjectFile &MachO) {
 static bool filterArch(ObjectFile &Obj) {
   if (ArchFilters.empty())
     return true;
+
   if (auto *MachO = dyn_cast<MachOObjectFile>(&Obj)) {
     std::string ObjArch =
         Triple::getArchTypeName(MachO->getArchTriple().getArch());
+
     for (auto Arch : ArchFilters) {
+      // Match name.
       if (Arch == ObjArch)
         return true;
+
+      // Match architecture number.
       unsigned Value;
       if (!StringRef(Arch).getAsInteger(0, Value))
         if (Value == getCPUType(*MachO))
@@ -232,14 +252,63 @@ static bool filterArch(ObjectFile &Obj) {
 using HandlerFn = std::function<bool(ObjectFile &, DWARFContext &DICtx, Twine,
                                      raw_ostream &)>;
 
+/// Print only DIEs that have a certain name.
+static void filterByName(const StringSet<> &Names,
+                         DWARFContext::cu_iterator_range CUs, raw_ostream &OS) {
+  for (const auto &CU : CUs)
+    for (const auto &Entry : CU->dies()) {
+      DWARFDie Die = {CU.get(), &Entry};
+      if (Names.count(Die.getName(DINameKind::ShortName)))
+        Die.dump(OS, 0, getDumpOpts());
+    }
+}
+
 static bool dumpObjectFile(ObjectFile &Obj, DWARFContext &DICtx, Twine Filename,
                            raw_ostream &OS) {
   logAllUnhandledErrors(DICtx.loadRegisterInfo(Obj), errs(),
                         Filename.str() + ": ");
+
   // The UUID dump already contains all the same information.
   if (!(DumpType & DIDT_UUID) || DumpType == DIDT_All)
     OS << Filename << ":\tfile format " << Obj.getFileFormatName() << '\n';
 
+  // Handle the --name option.
+  if (!Name.empty()) {
+    StringSet<> Names;
+    for (auto name : Name)
+      Names.insert(name);
+      
+    filterByName(Names, DICtx.compile_units(), OS);
+    filterByName(Names, DICtx.dwo_compile_units(), OS);
+    return true;
+  }
+
+  // Handle the --find option and lower it to --debug-info=<offset>.
+  if (!Find.empty()) {
+    DumpOffsets[DIDT_ID_DebugInfo] = [&]() -> llvm::Optional<uint64_t> {
+      for (auto Name : Find) {
+        auto find = [&](const DWARFAcceleratorTable &Accel)
+            -> llvm::Optional<uint64_t> {
+          for (auto Entry : Accel.equal_range(Name))
+            for (auto Atom : Entry)
+              if (auto Offset = Atom.getAsSectionOffset())
+                return Offset;
+          return None;
+        };
+        if (auto Offset = find(DICtx.getAppleNames()))
+          return DumpOffsets[DIDT_ID_DebugInfo] = *Offset;
+        if (auto Offset = find(DICtx.getAppleTypes()))
+          return DumpOffsets[DIDT_ID_DebugInfo] = *Offset;
+        if (auto Offset = find(DICtx.getAppleNamespaces()))
+          return DumpOffsets[DIDT_ID_DebugInfo] = *Offset;
+      }
+      return None;
+    }();
+    // Early exit if --find was specified but the current file doesn't have it.
+    if (!DumpOffsets[DIDT_ID_DebugInfo])
+      return true;
+  }
+  
   // Dump the complete DWARF structure.
   DICtx.dump(OS, getDumpOpts(), DumpOffsets);
   return true;

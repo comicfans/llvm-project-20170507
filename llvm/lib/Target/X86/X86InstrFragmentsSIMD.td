@@ -213,9 +213,6 @@ def X86kshiftr : SDNode<"X86ISD::KSHIFTR",
 def X86vrotli  : SDNode<"X86ISD::VROTLI", X86vshiftimm>;
 def X86vrotri  : SDNode<"X86ISD::VROTRI", X86vshiftimm>;
 
-def X86vprot   : SDNode<"X86ISD::VPROT", X86vshiftvariable>;
-def X86vproti  : SDNode<"X86ISD::VPROTI", X86vshiftimm>;
-
 def X86vpshl   : SDNode<"X86ISD::VPSHL", X86vshiftvariable>;
 def X86vpsha   : SDNode<"X86ISD::VPSHA", X86vshiftvariable>;
 
@@ -498,8 +495,8 @@ def X86FnmsubRnds3  : SDNode<"X86ISD::FNMSUBS3_RND",    SDTFmaRound, [SDNPCommut
 
 def SDTIFma : SDTypeProfile<1, 3, [SDTCisInt<0>, SDTCisSameAs<0,1>,
                            SDTCisSameAs<1,2>, SDTCisSameAs<1,3>]>;
-def x86vpmadd52l     : SDNode<"X86ISD::VPMADD52L",     SDTIFma>;
-def x86vpmadd52h     : SDNode<"X86ISD::VPMADD52H",     SDTIFma>;
+def x86vpmadd52l     : SDNode<"X86ISD::VPMADD52L",     SDTIFma, [SDNPCommutative]>;
+def x86vpmadd52h     : SDNode<"X86ISD::VPMADD52H",     SDTIFma, [SDNPCommutative]>;
 
 def X86rsqrt28   : SDNode<"X86ISD::RSQRT28",  SDTFPUnaryOpRound>;
 def X86rcp28     : SDNode<"X86ISD::RCP28",    SDTFPUnaryOpRound>;

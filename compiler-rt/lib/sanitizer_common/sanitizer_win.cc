@@ -28,7 +28,6 @@
 #include "sanitizer_libc.h"
 #include "sanitizer_mutex.h"
 #include "sanitizer_placement_new.h"
-#include "sanitizer_procmaps.h"
 #include "sanitizer_stacktrace.h"
 #include "sanitizer_symbolizer.h"
 #include "sanitizer_win_defs.h"
@@ -525,7 +524,7 @@ static uptr GetPreferredBase(const char *modname) {
 }
 
 void ListOfModules::init() {
-  clear();
+  clearOrInit();
   HANDLE cur_process = GetCurrentProcess();
 
   // Query the list of modules.  Start by assuming there are no more than 256

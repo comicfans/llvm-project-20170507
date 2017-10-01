@@ -447,8 +447,6 @@ namespace llvm {
       /// SSE4A Extraction and Insertion.
       EXTRQI, INSERTQI,
 
-      // XOP variable/immediate rotations.
-      VPROT, VPROTI,
       // XOP arithmetic/logical shifts.
       VPSHA, VPSHL,
       // XOP signed/unsigned integer comparisons.
@@ -467,6 +465,10 @@ namespace llvm {
 
       // Multiply and Add Packed Integers.
       VPMADDUBSW, VPMADDWD,
+
+      // AVX512IFMA multiply and add.
+      // NOTE: These are different than the instruction and perform
+      // op0 x op1 + op2.
       VPMADD52L, VPMADD52H,
 
       // FMA nodes.
