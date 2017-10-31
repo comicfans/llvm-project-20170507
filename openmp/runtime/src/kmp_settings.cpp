@@ -2,7 +2,6 @@
  * kmp_settings.cpp -- Initialize environment variables
  */
 
-
 //===----------------------------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
@@ -11,7 +10,6 @@
 // Source Licenses. See LICENSE.txt for details.
 //
 //===----------------------------------------------------------------------===//
-
 
 #include "kmp.h"
 #include "kmp_affinity.h"
@@ -24,7 +22,7 @@
 #include "kmp_settings.h"
 #include "kmp_str.h"
 #include "kmp_wrapper_getpid.h"
-#include <ctype.h>   // toupper()
+#include <ctype.h> // toupper()
 
 static int __kmp_env_toPrint(char const *name, int flag);
 
@@ -4114,14 +4112,13 @@ static void __kmp_stg_parse_hw_subset(char const *name, char const *value,
                                       void *data) {
   // Value example: 1s,5c@3,2T
   // Which means "use 1 socket, 5 cores with offset 3, 2 threads per core"
-  static int parsed = 0;
+  kmp_setting_t **rivals = (kmp_setting_t **)data;
   if (strcmp(name, "KMP_PLACE_THREADS") == 0) {
     KMP_INFORM(EnvVarDeprecated, name, "KMP_HW_SUBSET");
-    if (parsed == 1) {
-      return; // already parsed KMP_HW_SUBSET
-    }
   }
-  parsed = 1;
+  if (__kmp_stg_check_rivals(name, value, rivals)) {
+    return;
+  }
 
   char *components[MAX_T_LEVEL];
   char const *digits = "0123456789";
@@ -4731,6 +4728,24 @@ static void __kmp_stg_init(void) {
       kmp_all_threads->data = CCAST(kmp_setting_t **, rivals);
     }
 
+    { // Initialize KMP_HW_SUBSET and KMP_PLACE_THREADS
+      // 1st priority
+      kmp_setting_t *kmp_hw_subset = __kmp_stg_find("KMP_HW_SUBSET");
+      // 2nd priority
+      kmp_setting_t *kmp_place_threads = __kmp_stg_find("KMP_PLACE_THREADS");
+
+      // !!! volatile keyword is Intel (R) C Compiler bug CQ49908 workaround.
+      static kmp_setting_t *volatile rivals[3];
+      int i = 0;
+
+      rivals[i++] = kmp_hw_subset;
+      rivals[i++] = kmp_place_threads;
+      rivals[i++] = NULL;
+
+      kmp_hw_subset->data = CCAST(kmp_setting_t **, rivals);
+      kmp_place_threads->data = CCAST(kmp_setting_t **, rivals);
+    }
+
 #if KMP_AFFINITY_SUPPORTED
     { // Initialize KMP_AFFINITY, GOMP_CPU_AFFINITY, and OMP_PROC_BIND data.
       kmp_setting_t *kmp_affinity =
@@ -4911,7 +4926,6 @@ static void __kmp_aux_env_initialize(kmp_env_blk_t *block) {
   if (value) {
     ompc_set_dynamic(__kmp_global.g.g_dynamic);
   }
-
 }
 
 void __kmp_env_initialize(char const *string) {
@@ -4943,7 +4957,7 @@ void __kmp_env_initialize(char const *string) {
     }
   }
 
-// We need to know if blocktime was set when processing OMP_WAIT_POLICY
+  // We need to know if blocktime was set when processing OMP_WAIT_POLICY
   blocktime_str = __kmp_env_blk_var(&block, "KMP_BLOCKTIME");
 
   // Special case. If we parse environment, not a string, process KMP_WARNINGS

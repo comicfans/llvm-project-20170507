@@ -415,6 +415,8 @@ private:
   /// @param UserStmt The ast node to generate code for.
   virtual void createUser(__isl_take isl_ast_node *UserStmt);
 
+  virtual void createFor(__isl_take isl_ast_node *Node);
+
   enum DataDirection { HOST_TO_DEVICE, DEVICE_TO_HOST };
 
   /// Create code for a data transfer statement
@@ -1286,6 +1288,11 @@ void GPUNodeBuilder::createUser(__isl_take isl_ast_node *UserStmt) {
   isl_ast_node_free(UserStmt);
   return;
 }
+
+void GPUNodeBuilder::createFor(__isl_take isl_ast_node *Node) {
+  createForSequential(Node, false);
+}
+
 void GPUNodeBuilder::createKernelCopy(ppcg_kernel_stmt *KernelStmt) {
   isl_ast_expr *LocalIndex = isl_ast_expr_copy(KernelStmt->u.c.local_index);
   LocalIndex = isl_ast_expr_address_of(LocalIndex);
@@ -1811,6 +1818,8 @@ void GPUNodeBuilder::createKernel(__isl_take isl_ast_node *KernelStmt) {
   ValueMapT HostValueMap = ValueMap;
   BlockGenerator::AllocaMapTy HostScalarMap = ScalarMap;
   ScalarMap.clear();
+  BlockGenerator::EscapeUsersAllocaMapTy HostEscapeMap = EscapeMap;
+  EscapeMap.clear();
 
   // Create for all loops we depend on values that contain the current loop
   // iteration. These values are necessary to generate code for SCEVs that
@@ -1841,7 +1850,7 @@ void GPUNodeBuilder::createKernel(__isl_take isl_ast_node *KernelStmt) {
 
   ValueMap = std::move(HostValueMap);
   ScalarMap = std::move(HostScalarMap);
-  EscapeMap.clear();
+  EscapeMap = std::move(HostEscapeMap);
   IDToSAI.clear();
   Annotator.resetAlternativeAliasBases();
   for (auto &BasePtr : LocalArrays)
@@ -3478,6 +3487,12 @@ public:
     // preload invariant loads. Note: This should happen before the RTC
     // because the RTC may depend on values that are invariant load hoisted.
     if (!NodeBuilder.preloadInvariantLoads()) {
+      // Patch the introduced branch condition to ensure that we always execute
+      // the original SCoP.
+      auto *FalseI1 = Builder.getFalse();
+      auto *SplitBBTerm = Builder.GetInsertBlock()->getTerminator();
+      SplitBBTerm->setOperand(0, FalseI1);
+
       DEBUG(dbgs() << "preloading invariant loads failed in function: " +
                           S->getFunction().getName() +
                           " | Scop Region: " + S->getNameStr());

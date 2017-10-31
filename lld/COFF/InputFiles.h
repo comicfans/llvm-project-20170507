@@ -11,7 +11,7 @@
 #define LLD_COFF_INPUT_FILES_H
 
 #include "Config.h"
-#include "lld/Core/LLVM.h"
+#include "lld/Common/LLVM.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/LTO/LTO.h"
@@ -47,7 +47,6 @@ class DefinedImportData;
 class DefinedImportThunk;
 class Lazy;
 class SectionChunk;
-struct Symbol;
 class SymbolBody;
 class Undefined;
 

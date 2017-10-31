@@ -371,8 +371,7 @@ namespace {
       assert((VecWidth == 128 || VecWidth == 256) && "Unexpected vector width");
       uint64_t Index = N->getConstantOperandVal(1);
       MVT VecVT = N->getOperand(0).getSimpleValueType();
-      unsigned NumElemsPerChunk = VecWidth / VecVT.getScalarSizeInBits();
-      return getI8Imm(Index / NumElemsPerChunk, DL);
+      return getI8Imm((Index * VecVT.getScalarSizeInBits()) / VecWidth, DL);
     }
 
     SDValue getInsertVINSERTImmediate(SDNode *N, unsigned VecWidth,
@@ -380,8 +379,7 @@ namespace {
       assert((VecWidth == 128 || VecWidth == 256) && "Unexpected vector width");
       uint64_t Index = N->getConstantOperandVal(2);
       MVT VecVT = N->getSimpleValueType(0);
-      unsigned NumElemsPerChunk = VecWidth / VecVT.getScalarSizeInBits();
-      return getI8Imm(Index / NumElemsPerChunk, DL);
+      return getI8Imm((Index * VecVT.getScalarSizeInBits()) / VecWidth, DL);
     }
 
     /// Return an SDNode that returns the value of the global base register.
@@ -2730,7 +2728,7 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
       // Get the low part if needed. Don't use getCopyFromReg for aliasing
       // registers.
       if (!SDValue(Node, 0).use_empty())
-        ReplaceUses(SDValue(Node, 1),
+        ReplaceUses(SDValue(Node, 0),
           CurDAG->getTargetExtractSubreg(X86::sub_8bit, dl, MVT::i8, Result));
 
       // Shift AX down 8 bits.
@@ -2914,19 +2912,7 @@ void X86DAGToDAGISel::Select(SDNode *Node) {
 
       if (Opcode == X86ISD::UDIVREM8_ZEXT_HREG ||
           Opcode == X86ISD::SDIVREM8_SEXT_HREG) {
-        if (Node->getValueType(1) == MVT::i64) {
-          // It's not possible to directly movsx AH to a 64bit register, because
-          // the latter needs the REX prefix, but the former can't have it.
-          assert(Opcode != X86ISD::SDIVREM8_SEXT_HREG &&
-                 "Unexpected i64 sext of h-register");
-          Result =
-              SDValue(CurDAG->getMachineNode(
-                          TargetOpcode::SUBREG_TO_REG, dl, MVT::i64,
-                          CurDAG->getTargetConstant(0, dl, MVT::i64), Result,
-                          CurDAG->getTargetConstant(X86::sub_32bit, dl,
-                                                    MVT::i32)),
-                      0);
-        }
+        assert(Node->getValueType(1) == MVT::i32 && "Unexpected result type!");
       } else {
         Result =
             CurDAG->getTargetExtractSubreg(X86::sub_8bit, dl, MVT::i8, Result);

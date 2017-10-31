@@ -11,12 +11,12 @@
 #define LLD_ELF_INPUT_FILES_H
 
 #include "Config.h"
-#include "Error.h"
 #include "InputSection.h"
 #include "Symbols.h"
+#include "lld/Common/ErrorHandler.h"
 
-#include "lld/Core/LLVM.h"
-#include "lld/Core/Reproduce.h"
+#include "lld/Common/LLVM.h"
+#include "lld/Common/Reproduce.h"
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
@@ -128,7 +128,7 @@ public:
   }
 
   llvm::object::ELFFile<ELFT> getObj() const {
-    return llvm::object::ELFFile<ELFT>(MB.getBuffer());
+    return check(llvm::object::ELFFile<ELFT>::create(MB.getBuffer()));
   }
 
   StringRef getStringTable() const { return StringTable; }
@@ -167,7 +167,7 @@ public:
   ObjFile(MemoryBufferRef M, StringRef ArchiveName);
   void parse(llvm::DenseSet<llvm::CachedHashStringRef> &ComdatGroups);
 
-  InputSectionBase *getSection(const Elf_Sym &Sym) const;
+  InputSectionBase *getSection(uint32_t Index) const;
 
   SymbolBody &getSymbolBody(uint32_t SymbolIndex) const {
     if (SymbolIndex >= this->Symbols.size())
@@ -294,7 +294,6 @@ template <class ELFT> class SharedFile : public ELFFileBase<ELFT> {
 public:
   std::string SoName;
 
-  const Elf_Shdr *getSection(const Elf_Sym &Sym) const;
   llvm::ArrayRef<StringRef> getUndefinedSymbols() { return Undefs; }
 
   static bool classof(const InputFile *F) {

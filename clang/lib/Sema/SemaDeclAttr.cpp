@@ -1985,25 +1985,6 @@ static void handleNoReturnAttr(Sema &S, Decl *D, const AttributeList &Attrs) {
       Attrs.getRange(), S.Context, Attrs.getAttributeSpellingListIndex()));
 }
 
-static void handleNoThrowAttr(Sema &S, Decl *D, const AttributeList &Attrs) {
-  assert(isa<FunctionDecl>(D) && "attribute nothrow only valid on functions");
-
-  auto *FD = cast<FunctionDecl>(D);
-  const auto *FPT = FD->getType()->getAs<FunctionProtoType>();
-
-  if (FPT && FPT->hasExceptionSpec() &&
-      FPT->getExceptionSpecType() != EST_BasicNoexcept) {
-    S.Diag(Attrs.getLoc(),
-           diag::warn_nothrow_attr_disagrees_with_exception_specification);
-    S.Diag(FD->getExceptionSpecSourceRange().getBegin(),
-           diag::note_previous_decl)
-        << "exception specification";
-  }
-
-  D->addAttr(::new (S.Context) NoThrowAttr(
-      Attrs.getRange(), S.Context, Attrs.getAttributeSpellingListIndex()));
-}
-
 static void handleNoCallerSavedRegsAttr(Sema &S, Decl *D,
                                         const AttributeList &Attr) {
   if (S.CheckNoCallerSavedRegsAttr(Attr))
@@ -4404,7 +4385,7 @@ bool Sema::CheckCallingConvAttr(const AttributeList &Attrs, CallingConv &CC,
 static bool isValidSwiftContextType(QualType type) {
   if (!type->hasPointerRepresentation())
     return type->isDependentType();
-  return type->getPointeeType().getAddressSpace() == 0;
+  return type->getPointeeType().getAddressSpace() == LangAS::Default;
 }
 
 /// Pointers and references in the default address space.
@@ -4416,7 +4397,7 @@ static bool isValidSwiftIndirectResultType(QualType type) {
   } else {
     return type->isDependentType();
   }
-  return type.getAddressSpace() == 0;
+  return type.getAddressSpace() == LangAS::Default;
 }
 
 /// Pointers and references to pointers in the default address space.
@@ -6230,7 +6211,7 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     handleNoReturnAttr(S, D, Attr);
     break;
   case AttributeList::AT_NoThrow:
-    handleNoThrowAttr(S, D, Attr);
+    handleSimpleAttribute<NoThrowAttr>(S, D, Attr);
     break;
   case AttributeList::AT_CUDAShared:
     handleSharedAttr(S, D, Attr);

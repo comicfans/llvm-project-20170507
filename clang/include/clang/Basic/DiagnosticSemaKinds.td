@@ -355,7 +355,7 @@ def warn_implicit_function_decl : Warning<
   "implicit declaration of function %0">,
   InGroup<ImplicitFunctionDeclare>, DefaultIgnore;
 def ext_implicit_function_decl : ExtWarn<
-  "implicit declaration of function %0 is invalid in C99">,
+  "implicit declaration of function %0 is invalid in %select{C99|OpenCL}1">,
   InGroup<ImplicitFunctionDeclare>;
 def note_function_suggestion : Note<"did you mean %0?">;
 
@@ -366,8 +366,10 @@ def err_language_linkage_spec_unknown : Error<"unknown linkage language">;
 def err_language_linkage_spec_not_ascii : Error<
   "string literal in language linkage specifier cannot have an "
   "encoding-prefix">;
-def warn_use_out_of_scope_declaration : Warning<
-  "use of out-of-scope declaration of %0">;
+def ext_use_out_of_scope_declaration : ExtWarn<
+  "use of out-of-scope declaration of %0%select{| whose type is not "
+  "compatible with that of an implicit declaration}1">,
+  InGroup<DiagGroup<"out-of-scope-function">>;
 def err_inline_non_function : Error<
   "'inline' can only appear on functions%select{| and non-local variables}0">;
 def err_noreturn_non_function : Error<
@@ -1419,10 +1421,6 @@ def err_noexcept_needs_constant_expression : Error<
   "argument to noexcept specifier must be a constant expression">;
 def err_exception_spec_not_parsed : Error<
   "exception specification is not available until end of class definition">;
-def warn_nothrow_attr_disagrees_with_exception_specification
-    : ExtWarn<"attribute 'nothrow' ignored due to conflicting exception "
-              "specification">,
-      InGroup<IgnoredAttributes>;
 
 // C++ access checking
 def err_class_redeclared_with_different_access : Error<
@@ -4803,6 +4801,9 @@ def err_thread_non_thread : Error<
 def err_thread_thread_different_kind : Error<
   "thread-local declaration of %0 with %select{static|dynamic}1 initialization "
   "follows declaration with %select{dynamic|static}1 initialization">;
+def err_mismatched_owning_module : Error<
+  "declaration of %0 in %select{the global module|module %2}1 follows "
+  "declaration in %select{the global module|module %4}3">;
 def err_redefinition_different_type : Error<
   "redefinition of %0 with a different type%diff{: $ vs $|}1,2">;
 def err_redefinition_different_kind : Error<
@@ -5220,6 +5221,28 @@ def ext_flexible_array_empty_aggregate_gnu : Extension<
   InGroup<GNUEmptyStruct>;
 def ext_flexible_array_union_gnu : Extension<
   "flexible array member %0 in a union is a GNU extension">, InGroup<GNUFlexibleArrayUnionMember>;
+
+def err_flexible_array_not_at_end : Error<
+  "flexible array member %0 with type %1 is not at the end of"
+  " %select{struct|interface|union|class|enum}2">;
+def err_objc_variable_sized_type_not_at_end : Error<
+  "field %0 with variable sized type %1 is not at the end of class">;
+def note_next_field_declaration : Note<
+  "next field declaration is here">;
+def note_next_ivar_declaration : Note<
+  "next %select{instance variable declaration|synthesized instance variable}0"
+  " is here">;
+def err_synthesize_variable_sized_ivar : Error<
+  "synthesized property with variable size type %0"
+  " requires an existing instance variable">;
+def err_flexible_array_arc_retainable : Error<
+  "ARC forbids flexible array members with retainable object type">;
+def warn_variable_sized_ivar_visibility : Warning<
+  "field %0 with variable sized type %1 is not visible to subclasses and"
+  " can conflict with their instance variables">, InGroup<ObjCFlexibleArray>;
+def warn_superclass_variable_sized_type_not_at_end : Warning<
+  "field %0 can overwrite instance variable %1 with variable sized type %2"
+  " in superclass %3">, InGroup<ObjCFlexibleArray>;
 
 let CategoryName = "ARC Semantic Issue" in {
 
@@ -5937,18 +5960,18 @@ def note_typecheck_assign_const : Note<
   "member function %q1 is declared const here|"
   "%select{|nested }1data member %2 declared const here}0">;
 
-def warn_lunsigned_always_true_comparison : Warning<
-  "comparison of unsigned expression %0 is always %select{false|true}1">,
+def warn_unsigned_always_true_comparison : Warning<
+  "comparison of %select{%3|unsigned expression}0 %2 "
+  "%select{unsigned expression|%3}0 is always %select{false|true}4">,
   InGroup<TautologicalUnsignedZeroCompare>;
-def warn_runsigned_always_true_comparison : Warning<
-  "comparison of %0 unsigned expression is always %select{false|true}1">,
-  InGroup<TautologicalUnsignedZeroCompare>;
-def warn_lunsigned_enum_always_true_comparison : Warning<
-  "comparison of unsigned enum expression %0 is always %select{false|true}1">,
+def warn_unsigned_enum_always_true_comparison : Warning<
+  "comparison of %select{%3|unsigned enum expression}0 %2 "
+  "%select{unsigned enum expression|%3}0 is always %select{false|true}4">,
   InGroup<TautologicalUnsignedEnumZeroCompare>;
-def warn_runsigned_enum_always_true_comparison : Warning<
-  "comparison of %0 unsigned enum expression is always %select{false|true}1">,
-  InGroup<TautologicalUnsignedEnumZeroCompare>;
+def warn_tautological_constant_compare : Warning<
+  "comparison %select{%3|%1}0 %2 "
+  "%select{%1|%3}0 is always %select{false|true}4">,
+  InGroup<TautologicalConstantCompare>;
 
 def warn_mixed_sign_comparison : Warning<
   "comparison of integers of different signs: %0 and %1">,
@@ -7542,6 +7565,9 @@ def err_ambiguous_derived_to_base_conv : Error<
 def err_ambiguous_memptr_conv : Error<
   "ambiguous conversion from pointer to member of %select{base|derived}0 "
   "class %1 to pointer to member of %select{derived|base}0 class %2:%3">;
+def ext_ms_ambiguous_direct_base : ExtWarn<
+  "accessing inaccessible direct base %0 of %1 is a Microsoft extension">,
+  InGroup<MicrosoftInaccessibleBase>;
 
 def err_memptr_conv_via_virtual : Error<
   "conversion from pointer to member of class %0 to pointer to member "
@@ -7611,6 +7637,11 @@ def err_operator_delete_dependent_param_type : Error<
   "%0 cannot take a dependent type as first parameter; use %1 instead">;
 def err_operator_delete_param_type : Error<
   "first parameter of %0 must have type %1">;
+def err_destroying_operator_delete_not_usual : Error<
+  "destroying operator delete can have only an optional size and optional "
+  "alignment parameter">;
+def note_implicit_delete_this_in_destructor_here : Note<
+  "while checking implicit 'delete this' for virtual destructor">;
 
 // C++ literal operators
 def err_literal_operator_outside_namespace : Error<
@@ -8451,8 +8482,6 @@ def err_opencl_scalar_type_rank_greater_than_vector_type : Error<
     "element. (%0 and %1)">;
 def err_bad_kernel_param_type : Error<
   "%0 cannot be used as the type of a kernel parameter">;
-def err_opencl_implicit_function_decl : Error<
-  "implicit declaration of function %0 is invalid in OpenCL">;
 def err_record_with_pointers_kernel_param : Error<
   "%select{struct|union}0 kernel parameters may not contain pointers">;
 def note_within_field_of_type : Note<
@@ -8995,6 +9024,14 @@ def err_module_redefinition : Error<
   "redefinition of module '%0'">;
 def note_prev_module_definition : Note<"previously defined here">;
 def note_prev_module_definition_from_ast_file : Note<"module loaded from '%0'">;
+def err_module_not_defined : Error<
+  "definition of module '%0' is not available; use -fmodule-file= to specify "
+  "path to precompiled module interface">;
+def err_module_redeclaration : Error<
+  "translation unit contains multiple module declarations">;
+def note_prev_module_declaration : Note<"previous module declaration is here">;
+def err_module_declaration_missing : Error<
+  "missing 'export module' declaration in module interface unit">;
 def err_module_private_specialization : Error<
   "%select{template|partial|member}0 specialization cannot be "
   "declared __module_private__">;

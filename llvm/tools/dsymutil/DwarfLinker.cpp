@@ -35,6 +35,7 @@
 #include "llvm/Object/MachO.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/TargetRegistry.h"
+#include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include <memory>
@@ -479,7 +480,7 @@ class DwarfStreamer {
   /// @}
 
   /// The file we stream the linked Dwarf to.
-  std::unique_ptr<raw_fd_ostream> OutFile;
+  std::unique_ptr<ToolOutputFile> OutFile;
 
   uint32_t RangesSectionSize;
   uint32_t LocSectionSize;
@@ -524,6 +525,9 @@ public:
 
   /// Emit the string table described by \p Pool.
   void emitStrings(const NonRelocatableStringpool &Pool);
+
+  /// Emit the swift_ast section stored in \p Buffer.
+  void emitSwiftAST(StringRef Buffer);
 
   /// Emit debug_ranges for \p FuncRange by translating the
   /// original \p Entries.
@@ -614,13 +618,14 @@ bool DwarfStreamer::init(Triple TheTriple, StringRef OutputFilename) {
   // Create the output file.
   std::error_code EC;
   OutFile =
-      llvm::make_unique<raw_fd_ostream>(OutputFilename, EC, sys::fs::F_None);
+      llvm::make_unique<ToolOutputFile>(OutputFilename, EC, sys::fs::F_None);
   if (EC)
     return error(Twine(OutputFilename) + ": " + EC.message(), Context);
 
   MCTargetOptions MCOptions = InitMCTargetOptionsFromFlags();
   MS = TheTarget->createMCObjectStreamer(
-      TheTriple, *MC, *MAB, *OutFile, MCE, *MSTI, MCOptions.MCRelaxAll,
+      TheTriple, *MC, std::unique_ptr<MCAsmBackend>(MAB), OutFile->os(),
+      std::unique_ptr<MCCodeEmitter>(MCE), *MSTI, MCOptions.MCRelaxAll,
       MCOptions.MCIncrementalLinkerCompatible,
       /*DWARFMustBeAtTheEnd*/ false);
   if (!MS)
@@ -645,11 +650,16 @@ bool DwarfStreamer::init(Triple TheTriple, StringRef OutputFilename) {
 }
 
 bool DwarfStreamer::finish(const DebugMap &DM) {
+  bool Result = true;
   if (DM.getTriple().isOSDarwin() && !DM.getBinaryPath().empty())
-    return MachOUtils::generateDsymCompanion(DM, *MS, *OutFile);
+    Result = MachOUtils::generateDsymCompanion(DM, *MS, OutFile->os());
+  else
+    MS->Finish();
 
-  MS->Finish();
-  return true;
+  // Declare success.
+  OutFile->keep();
+
+  return Result;
 }
 
 /// Set the current output section to debug_info and change
@@ -706,6 +716,14 @@ void DwarfStreamer::emitStrings(const NonRelocatableStringpool &Pool) {
        Entry = Pool.getNextEntry(Entry))
     Asm->OutStreamer->EmitBytes(
         StringRef(Entry->getKey().data(), Entry->getKey().size() + 1));
+}
+
+/// Emit the swift_ast section stored in \p Buffers.
+void DwarfStreamer::emitSwiftAST(StringRef Buffer) {
+  MCSection *SwiftASTSection = MOFI->getDwarfSwiftASTSection();
+  SwiftASTSection->setAlignment(1 << 5);
+  MS->SwitchSection(SwiftASTSection);
+  MS->EmitBytes(Buffer);
 }
 
 /// Emit the debug_range section contents for \p FuncRange by
@@ -2866,7 +2884,8 @@ DIE *DwarfLinker::DIECloner::cloneDIE(
                               Tag == dwarf::DW_TAG_inlined_subroutine);
   } else if (isTypeTag(Tag) && !AttrInfo.IsDeclaration &&
              getDIENames(InputDIE, AttrInfo)) {
-    Unit.addTypeAccelerator(Die, AttrInfo.Name, AttrInfo.NameOffset);
+    if (AttrInfo.Name)
+      Unit.addTypeAccelerator(Die, AttrInfo.Name, AttrInfo.NameOffset);
   }
 
   // Determine whether there are any children that we want to keep.
@@ -3329,8 +3348,8 @@ void DwarfLinker::loadClangModule(StringRef Filename, StringRef ModulePath,
   else
     sys::path::append(Path, Filename);
   BinaryHolder ObjHolder(Options.Verbose);
-  auto &Obj =
-      ModuleMap.addDebugMapObject(Path, sys::TimePoint<std::chrono::seconds>());
+  auto &Obj = ModuleMap.addDebugMapObject(
+      Path, sys::TimePoint<std::chrono::seconds>(), MachO::N_OSO);
   auto ErrOrObj = loadObject(ObjHolder, Obj, ModuleMap);
   if (!ErrOrObj) {
     // Try and emit more helpful warnings by applying some heuristics.
@@ -3475,6 +3494,35 @@ bool DwarfLinker::link(const DebugMap &Map) {
 
     if (Options.Verbose)
       outs() << "DEBUG MAP OBJECT: " << Obj->getObjectFilename() << "\n";
+
+    // N_AST objects (swiftmodule files) should get dumped directly into the
+    // appropriate DWARF section.
+    if (Obj->getType() == MachO::N_AST) {
+      StringRef File = Obj->getObjectFilename();
+      auto ErrorOrMem = MemoryBuffer::getFile(File);
+      if (!ErrorOrMem) {
+        errs() << "Warning: Could not open " << File << "\n";
+        continue;
+      }
+      sys::fs::file_status Stat;
+      if (auto errc = sys::fs::status(File, Stat)) {
+        errs() << "Warning: " << errc.message() << "\n";
+        continue;
+      }
+      if (!Options.NoTimestamp && Stat.getLastModificationTime() !=
+                                      sys::TimePoint<>(Obj->getTimestamp())) {
+        errs() << "Warning: Timestamp mismatch for " << File << ": "
+               << Stat.getLastModificationTime() << " and "
+               << sys::TimePoint<>(Obj->getTimestamp()) << "\n";
+        continue;
+      }
+
+      // Copy the module into the .swift_ast section.
+      if (!Options.NoOutput)
+        Streamer->emitSwiftAST((*ErrorOrMem)->getBuffer());
+      continue;
+    }
+
     auto ErrOrObj = loadObject(BinHolder, *Obj, Map);
     if (!ErrOrObj)
       continue;

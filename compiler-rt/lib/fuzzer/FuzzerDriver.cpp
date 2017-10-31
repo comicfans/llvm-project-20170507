@@ -578,6 +578,7 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
   Options.ReloadIntervalSec = Flags.reload;
   Options.OnlyASCII = Flags.only_ascii;
   Options.DetectLeaks = Flags.detect_leaks;
+  Options.PurgeAllocatorIntervalSec = Flags.purge_allocator_interval;
   Options.TraceMalloc = Flags.trace_malloc;
   Options.RssLimitMb = Flags.rss_limit_mb;
   if (Flags.runs >= 0)
@@ -604,6 +605,8 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
   Options.PrintCorpusStats = Flags.print_corpus_stats;
   Options.PrintCoverage = Flags.print_coverage;
   Options.DumpCoverage = Flags.dump_coverage;
+  Options.UseClangCoverage = Flags.use_clang_coverage;
+  Options.UseFeatureFrequency = Flags.use_feature_frequency;
   if (Flags.exit_on_src_pos)
     Options.ExitOnSrcPos = Flags.exit_on_src_pos;
   if (Flags.exit_on_item)

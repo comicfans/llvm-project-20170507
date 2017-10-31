@@ -907,7 +907,8 @@ bool CursorVisitor::VisitFunctionTemplateDecl(FunctionTemplateDecl *D) {
   if (VisitTemplateParameters(D->getTemplateParameters()))
     return true;
   
-  return VisitFunctionDecl(D->getTemplatedDecl());
+  auto* FD = D->getTemplatedDecl();
+  return VisitAttributes(FD) || VisitFunctionDecl(FD);
 }
 
 bool CursorVisitor::VisitClassTemplateDecl(ClassTemplateDecl *D) {
@@ -916,7 +917,8 @@ bool CursorVisitor::VisitClassTemplateDecl(ClassTemplateDecl *D) {
   if (VisitTemplateParameters(D->getTemplateParameters()))
     return true;
   
-  return VisitCXXRecordDecl(D->getTemplatedDecl());
+  auto* CD = D->getTemplatedDecl();
+  return VisitAttributes(CD) || VisitCXXRecordDecl(CD);
 }
 
 bool CursorVisitor::VisitTemplateTemplateParmDecl(TemplateTemplateParmDecl *D) {
@@ -1742,6 +1744,7 @@ DEFAULT_TYPELOC_IMPL(ConstantArray, ArrayType)
 DEFAULT_TYPELOC_IMPL(IncompleteArray, ArrayType)
 DEFAULT_TYPELOC_IMPL(VariableArray, ArrayType)
 DEFAULT_TYPELOC_IMPL(DependentSizedArray, ArrayType)
+DEFAULT_TYPELOC_IMPL(DependentAddressSpace, Type)
 DEFAULT_TYPELOC_IMPL(DependentSizedExtVector, Type)
 DEFAULT_TYPELOC_IMPL(Vector, Type)
 DEFAULT_TYPELOC_IMPL(ExtVector, VectorType)

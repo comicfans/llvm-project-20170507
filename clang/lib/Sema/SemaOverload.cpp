@@ -6343,24 +6343,36 @@ void Sema::AddFunctionCandidates(const UnresolvedSetImpl &Fns,
                                  OverloadCandidateSet& CandidateSet,
                                  TemplateArgumentListInfo *ExplicitTemplateArgs,
                                  bool SuppressUserConversions,
-                                 bool PartialOverloading) {
+                                 bool PartialOverloading,
+                                 bool FirstArgumentIsBase) {
   for (UnresolvedSetIterator F = Fns.begin(), E = Fns.end(); F != E; ++F) {
     NamedDecl *D = F.getDecl()->getUnderlyingDecl();
     if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+      ArrayRef<Expr *> FunctionArgs = Args;
       if (isa<CXXMethodDecl>(FD) && !cast<CXXMethodDecl>(FD)->isStatic()) {
         QualType ObjectType;
         Expr::Classification ObjectClassification;
-        if (Expr *E = Args[0]) {
-          // Use the explit base to restrict the lookup:
-          ObjectType = E->getType();
-          ObjectClassification = E->Classify(Context);
-        } // .. else there is an implit base.
+        if (Args.size() > 0) {
+          if (Expr *E = Args[0]) {
+            // Use the explit base to restrict the lookup:
+            ObjectType = E->getType();
+            ObjectClassification = E->Classify(Context);
+          } // .. else there is an implit base.
+          FunctionArgs = Args.slice(1);
+        }
         AddMethodCandidate(cast<CXXMethodDecl>(FD), F.getPair(),
                            cast<CXXMethodDecl>(FD)->getParent(), ObjectType,
-                           ObjectClassification, Args.slice(1), CandidateSet,
+                           ObjectClassification, FunctionArgs, CandidateSet,
                            SuppressUserConversions, PartialOverloading);
       } else {
-        AddOverloadCandidate(FD, F.getPair(), Args, CandidateSet,
+        // Slice the first argument (which is the base) when we access
+        // static method as non-static
+        if (Args.size() > 0 && (!Args[0] || (FirstArgumentIsBase && isa<CXXMethodDecl>(FD) &&
+                                             !isa<CXXConstructorDecl>(FD)))) {
+          assert(cast<CXXMethodDecl>(FD)->isStatic());
+          FunctionArgs = Args.slice(1);
+        }
+        AddOverloadCandidate(FD, F.getPair(), FunctionArgs, CandidateSet,
                              SuppressUserConversions, PartialOverloading);
       }
     } else {
@@ -8965,12 +8977,6 @@ bool clang::isBetterOverloadCandidate(
     // C++14 [over.match.best]p1 section 2 bullet 3.
   }
 
-  //    -- F1 is generated from a deduction-guide and F2 is not
-  auto *Guide1 = dyn_cast_or_null<CXXDeductionGuideDecl>(Cand1.Function);
-  auto *Guide2 = dyn_cast_or_null<CXXDeductionGuideDecl>(Cand2.Function);
-  if (Guide1 && Guide2 && Guide1->isImplicit() != Guide2->isImplicit())
-    return Guide2->isImplicit();
-
   //    -- F1 is a non-template function and F2 is a function template
   //       specialization, or, if not that,
   bool Cand1IsSpecialization = Cand1.Function &&
@@ -9014,6 +9020,23 @@ bool clang::isBetterOverloadCandidate(
       return false;
     // Inherited from sibling base classes: still ambiguous.
   }
+
+  // Check C++17 tie-breakers for deduction guides.
+  {
+    auto *Guide1 = dyn_cast_or_null<CXXDeductionGuideDecl>(Cand1.Function);
+    auto *Guide2 = dyn_cast_or_null<CXXDeductionGuideDecl>(Cand2.Function);
+    if (Guide1 && Guide2) {
+      //  -- F1 is generated from a deduction-guide and F2 is not
+      if (Guide1->isImplicit() != Guide2->isImplicit())
+        return Guide2->isImplicit();
+
+      //  -- F1 is the copy deduction candidate(16.3.1.8) and F2 is not
+      if (Guide1->isCopyDeductionCandidate())
+        return true;
+    }
+  }
+  
+
 
   // FIXME: Work around a defect in the C++17 guaranteed copy elision wording,
   // as combined with the resolution to CWG issue 243.
@@ -11927,7 +11950,7 @@ static bool IsOverloaded(const UnresolvedSetImpl &Functions) {
 ExprResult
 Sema::CreateOverloadedUnaryOp(SourceLocation OpLoc, UnaryOperatorKind Opc,
                               const UnresolvedSetImpl &Fns,
-                              Expr *Input) {
+                              Expr *Input, bool PerformADL) {
   OverloadedOperatorKind Op = UnaryOperator::getOverloadedOperator(Opc);
   assert(Op != OO_None && "Invalid opcode for overloaded unary operator");
   DeclarationName OpName = Context.DeclarationNames.getCXXOperatorName(Op);
@@ -11978,9 +12001,11 @@ Sema::CreateOverloadedUnaryOp(SourceLocation OpLoc, UnaryOperatorKind Opc,
   AddMemberOperatorCandidates(Op, OpLoc, ArgsArray, CandidateSet);
 
   // Add candidates from ADL.
-  AddArgumentDependentLookupCandidates(OpName, OpLoc, ArgsArray,
-                                       /*ExplicitTemplateArgs*/nullptr,
-                                       CandidateSet);
+  if (PerformADL) {
+    AddArgumentDependentLookupCandidates(OpName, OpLoc, ArgsArray,
+                                         /*ExplicitTemplateArgs*/nullptr,
+                                         CandidateSet);
+  }
 
   // Add builtin operator candidates.
   AddBuiltinOperatorCandidates(Op, OpLoc, ArgsArray, CandidateSet);
@@ -12118,7 +12143,7 @@ ExprResult
 Sema::CreateOverloadedBinOp(SourceLocation OpLoc,
                             BinaryOperatorKind Opc,
                             const UnresolvedSetImpl &Fns,
-                            Expr *LHS, Expr *RHS) {
+                            Expr *LHS, Expr *RHS, bool PerformADL) {
   Expr *Args[2] = { LHS, RHS };
   LHS=RHS=nullptr; // Please use only Args instead of LHS/RHS couple
 
@@ -12149,7 +12174,7 @@ Sema::CreateOverloadedBinOp(SourceLocation OpLoc,
     UnresolvedLookupExpr *Fn
       = UnresolvedLookupExpr::Create(Context, NamingClass,
                                      NestedNameSpecifierLoc(), OpNameInfo,
-                                     /*ADL*/ true, IsOverloaded(Fns),
+                                     /*ADL*/PerformADL, IsOverloaded(Fns),
                                      Fns.begin(), Fns.end());
     return new (Context)
         CXXOperatorCallExpr(Context, Op, Fn, Args, Context.DependentTy,
@@ -12192,7 +12217,7 @@ Sema::CreateOverloadedBinOp(SourceLocation OpLoc,
   // Add candidates from ADL. Per [over.match.oper]p2, this lookup is not
   // performed for an assignment operator (nor for operator[] nor operator->,
   // which don't get here).
-  if (Opc != BO_Assign)
+  if (Opc != BO_Assign && PerformADL)
     AddArgumentDependentLookupCandidates(OpName, OpLoc, Args,
                                          /*ExplicitTemplateArgs*/ nullptr,
                                          CandidateSet);

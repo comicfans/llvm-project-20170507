@@ -5425,10 +5425,12 @@ PreprocessedEntity *ASTReader::ReadPreprocessedEntity(unsigned Index) {
   llvm_unreachable("Invalid PreprocessorDetailRecordTypes");
 }
 
-/// \brief \arg SLocMapI points at a chunk of a module that contains no
-/// preprocessed entities or the entities it contains are not the ones we are
-/// looking for. Find the next module that contains entities and return the ID
+/// \brief Find the next module that contains entities and return the ID
 /// of the first entry.
+///
+/// \param SLocMapI points at a chunk of a module that contains no
+/// preprocessed entities or the entities it contains are not the ones we are
+/// looking for.
 PreprocessedEntityID ASTReader::findNextPreprocessedEntity(
                        GlobalSLocOffsetMapType::const_iterator SLocMapI) const {
   ++SLocMapI;
@@ -5728,7 +5730,8 @@ void ASTReader::ReadPragmaDiagnosticMappings(DiagnosticsEngine &Diag) {
 
       // Preserve the property that the imaginary root file describes the
       // current state.
-      auto &T = Diag.DiagStatesByLoc.Files[FileID()].StateTransitions;
+      FileID NullFile;
+      auto &T = Diag.DiagStatesByLoc.Files[NullFile].StateTransitions;
       if (T.empty())
         T.push_back({CurState, 0});
       else
@@ -6269,6 +6272,18 @@ QualType ASTReader::readTypeRecord(unsigned Index) {
     return Context.getDependentSizedExtVectorType(ElementType, SizeExpr,
                                                   AttrLoc);
   }
+
+  case TYPE_DEPENDENT_ADDRESS_SPACE: {
+    unsigned Idx = 0;
+
+    // DependentAddressSpaceType
+    QualType PointeeType = readType(*Loc.F, Record, Idx);
+    Expr *AddrSpaceExpr = ReadExpr(*Loc.F);
+    SourceLocation AttrLoc = ReadSourceLocation(*Loc.F, Record, Idx);
+
+    return Context.getDependentAddressSpaceType(PointeeType, AddrSpaceExpr,
+                                                   AttrLoc);
+  }
   }
   llvm_unreachable("Invalid TypeCode!");
 }
@@ -6400,6 +6415,17 @@ void TypeLocReader::VisitVariableArrayTypeLoc(VariableArrayTypeLoc TL) {
 void TypeLocReader::VisitDependentSizedArrayTypeLoc(
                                             DependentSizedArrayTypeLoc TL) {
   VisitArrayTypeLoc(TL);
+}
+
+void TypeLocReader::VisitDependentAddressSpaceTypeLoc(
+    DependentAddressSpaceTypeLoc TL) {
+
+    TL.setAttrNameLoc(ReadSourceLocation());
+    SourceRange range;
+    range.setBegin(ReadSourceLocation());
+    range.setEnd(ReadSourceLocation());
+    TL.setAttrOperandParensRange(range);
+    TL.setAttrExprOperand(Reader->ReadExpr(*F));
 }
 
 void TypeLocReader::VisitDependentSizedExtVectorTypeLoc(

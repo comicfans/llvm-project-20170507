@@ -1,15 +1,24 @@
-// RUN: %clang_analyze_cc1 -std=c++11 -fblocks -analyzer-checker=core,debug.ExprInspection -w -verify %s
+// RUN: %clang_analyze_cc1 -std=c++11 -fblocks -analyzer-checker=core,debug.ExprInspection -verify %s
+// RUN: %clang_analyze_cc1 -std=c++11 -fblocks -analyzer-checker=core,debug.ExprInspection -DEMULATE_LIBSTDCPP -verify %s
 
 void clang_analyzer_eval(bool);
 
 // Faking std::std::call_once implementation.
 namespace std {
+
+#ifndef EMULATE_LIBSTDCPP
 typedef struct once_flag_s {
   unsigned long __state_ = 0;
 } once_flag;
+#else
+typedef struct once_flag_s {
+  int _M_once = 0;
+} once_flag;
+#endif
 
 template <class Callable, class... Args>
-void call_once(once_flag &o, Callable func, Args... args) {};
+void call_once(once_flag &o, Callable&& func, Args&&... args) {};
+
 } // namespace std
 
 // Check with Lambdas.
@@ -230,4 +239,67 @@ int call_once() {
 void test_non_std_call_once() {
   int x = call_once();
   clang_analyzer_eval(x == 5); // expected-warning{{TRUE}}
+}
+
+namespace std {
+template <typename d, typename e>
+void call_once(d, e);
+}
+void g();
+void test_no_segfault_on_different_impl() {
+  std::call_once(g, false); // no-warning
+}
+
+void test_lambda_refcapture() {
+  static std::once_flag flag;
+  int a = 6;
+  std::call_once(flag, [&](int &a) { a = 42; }, a);
+  clang_analyzer_eval(a == 42); // expected-warning{{TRUE}}
+}
+
+void test_lambda_refcapture2() {
+  static std::once_flag flag;
+  int a = 6;
+  std::call_once(flag, [=](int &a) { a = 42; }, a);
+  clang_analyzer_eval(a == 42); // expected-warning{{TRUE}}
+}
+
+void test_lambda_fail_refcapture() {
+  static std::once_flag flag;
+  int a = 6;
+  std::call_once(flag, [=](int a) { a = 42; }, a);
+  clang_analyzer_eval(a == 42); // expected-warning{{FALSE}}
+}
+
+void mutator(int &param) {
+  param = 42;
+}
+void test_reftypes_funcptr() {
+  static std::once_flag flag;
+  int a = 6;
+  std::call_once(flag, &mutator, a);
+  clang_analyzer_eval(a == 42); // expected-warning{{TRUE}}
+}
+
+void fail_mutator(int param) {
+  param = 42;
+}
+void test_mutator_noref() {
+  static std::once_flag flag;
+  int a = 6;
+  std::call_once(flag, &fail_mutator, a);
+  clang_analyzer_eval(a == 42); // expected-warning{{FALSE}}
+}
+
+// Function is implicitly treated as a function pointer
+// even when an ampersand is not explicitly set.
+void callbackn(int &param) {
+  param = 42;
+}
+void test_implicit_funcptr() {
+  int x = 0;
+  static std::once_flag flagn;
+
+  std::call_once(flagn, callbackn, x);
+  clang_analyzer_eval(x == 42); // expected-warning{{TRUE}}
 }

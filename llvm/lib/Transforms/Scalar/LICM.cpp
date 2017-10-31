@@ -42,7 +42,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
-#include "llvm/Analysis/OptimizationDiagnosticInfo.h"
+#include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionAliasAnalysis.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -577,10 +577,13 @@ bool llvm::canSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
                               Loop *CurLoop, AliasSetTracker *CurAST,
                               LoopSafetyInfo *SafetyInfo,
                               OptimizationRemarkEmitter *ORE) {
+  // SafetyInfo is nullptr if we are checking for sinking from preheader to
+  // loop body.
+  const bool SinkingToLoopBody = !SafetyInfo;
   // Loads have extra constraints we have to verify before we can hoist them.
   if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
     if (!LI->isUnordered())
-      return false; // Don't hoist volatile/atomic loads!
+      return false; // Don't sink/hoist volatile or ordered atomic loads!
 
     // Loads from constant memory are always safe to move, even if they end up
     // in the same alias set as something that ends up being modified.
@@ -588,6 +591,9 @@ bool llvm::canSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
       return true;
     if (LI->getMetadata(LLVMContext::MD_invariant_load))
       return true;
+
+    if (LI->isAtomic() && SinkingToLoopBody)
+      return false; // Don't sink unordered atomic loads to loop body.
 
     // This checks for an invariant.start dominating the load.
     if (isLoadInvariantInLoop(LI, DT, CurLoop))
@@ -606,10 +612,12 @@ bool llvm::canSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
     // Check loop-invariant address because this may also be a sinkable load
     // whose address is not necessarily loop-invariant.
     if (ORE && Invalidated && CurLoop->isLoopInvariant(LI->getPointerOperand()))
-      ORE->emit(OptimizationRemarkMissed(
-                    DEBUG_TYPE, "LoadWithLoopInvariantAddressInvalidated", LI)
-                << "failed to move load with loop-invariant address "
-                   "because the loop may invalidate its value");
+      ORE->emit([&]() {
+        return OptimizationRemarkMissed(
+                   DEBUG_TYPE, "LoadWithLoopInvariantAddressInvalidated", LI)
+               << "failed to move load with loop-invariant address "
+                  "because the loop may invalidate its value";
+      });
 
     return !Invalidated;
   } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
@@ -664,9 +672,9 @@ bool llvm::canSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
       !isa<InsertValueInst>(I))
     return false;
 
-  // SafetyInfo is nullptr if we are checking for sinking from preheader to
-  // loop body. It will be always safe as there is no speculative execution.
-  if (!SafetyInfo)
+  // If we are checking for sinking from preheader to loop body it will be
+  // always safe as there is no speculative execution.
+  if (SinkingToLoopBody)
     return true;
 
   // TODO: Plumb the context instruction through to make hoisting and sinking
@@ -808,8 +816,10 @@ static bool sink(Instruction &I, const LoopInfo *LI, const DominatorTree *DT,
                  const LoopSafetyInfo *SafetyInfo,
                  OptimizationRemarkEmitter *ORE) {
   DEBUG(dbgs() << "LICM sinking instruction: " << I << "\n");
-  ORE->emit(OptimizationRemark(DEBUG_TYPE, "InstSunk", &I)
-            << "sinking " << ore::NV("Inst", &I));
+  ORE->emit([&]() {
+    return OptimizationRemark(DEBUG_TYPE, "InstSunk", &I)
+           << "sinking " << ore::NV("Inst", &I);
+  });
   bool Changed = false;
   if (isa<LoadInst>(I))
     ++NumMovedLoads;
@@ -881,8 +891,10 @@ static bool hoist(Instruction &I, const DominatorTree *DT, const Loop *CurLoop,
   auto *Preheader = CurLoop->getLoopPreheader();
   DEBUG(dbgs() << "LICM hoisting to " << Preheader->getName() << ": " << I
                << "\n");
-  ORE->emit(OptimizationRemark(DEBUG_TYPE, "Hoisted", &I)
-            << "hoisting " << ore::NV("Inst", &I));
+  ORE->emit([&]() {
+    return OptimizationRemark(DEBUG_TYPE, "Hoisted", &I) << "hoisting "
+                                                         << ore::NV("Inst", &I);
+  });
 
   // Metadata can be dependent on conditions we are hoisting above.
   // Conservatively strip all metadata on the instruction unless we were
@@ -932,10 +944,12 @@ static bool isSafeToExecuteUnconditionally(Instruction &Inst,
   if (!GuaranteedToExecute) {
     auto *LI = dyn_cast<LoadInst>(&Inst);
     if (LI && CurLoop->isLoopInvariant(LI->getPointerOperand()))
-      ORE->emit(OptimizationRemarkMissed(
-                    DEBUG_TYPE, "LoadWithLoopInvariantAddressCondExecuted", LI)
-                << "failed to hoist load with loop-invariant address "
-                   "because load is conditionally executed");
+      ORE->emit([&]() {
+        return OptimizationRemarkMissed(
+                   DEBUG_TYPE, "LoadWithLoopInvariantAddressCondExecuted", LI)
+               << "failed to hoist load with loop-invariant address "
+                  "because load is conditionally executed";
+      });
   }
 
   return GuaranteedToExecute;
@@ -1019,6 +1033,30 @@ public:
   }
   void instructionDeleted(Instruction *I) const override { AST.deleteValue(I); }
 };
+
+
+/// Return true iff we can prove that a caller of this function can not inspect
+/// the contents of the provided object in a well defined program.
+bool isKnownNonEscaping(Value *Object, const TargetLibraryInfo *TLI) {
+  if (isa<AllocaInst>(Object))
+    // Since the alloca goes out of scope, we know the caller can't retain a
+    // reference to it and be well defined.  Thus, we don't need to check for
+    // capture. 
+    return true;
+  
+  // For all other objects we need to know that the caller can't possibly
+  // have gotten a reference to the object.  There are two components of
+  // that:
+  //   1) Object can't be escaped by this function.  This is what
+  //      PointerMayBeCaptured checks.
+  //   2) Object can't have been captured at definition site.  For this, we
+  //      need to know the return value is noalias.  At the moment, we use a
+  //      weaker condition and handle only AllocLikeFunctions (which are
+  //      known to be noalias).  TODO
+  return isAllocLikeFn(Object, TLI) &&
+    !PointerMayBeCaptured(Object, true, true);
+}
+
 } // namespace
 
 /// Try to promote memory values to scalars by sinking stores out of the
@@ -1093,35 +1131,19 @@ bool llvm::promoteLoopAccessesToScalars(
 
   const DataLayout &MDL = Preheader->getModule()->getDataLayout();
 
-  // Do we know this object does not escape ?
-  bool IsKnownNonEscapingObject = false;
+  bool IsKnownThreadLocalObject = false;
   if (SafetyInfo->MayThrow) {
     // If a loop can throw, we have to insert a store along each unwind edge.
     // That said, we can't actually make the unwind edge explicit. Therefore,
-    // we have to prove that the store is dead along the unwind edge.
-    //
-    // If the underlying object is not an alloca, nor a pointer that does not
-    // escape, then we can not effectively prove that the store is dead along
-    // the unwind edge. i.e. the caller of this function could have ways to
-    // access the pointed object.
+    // we have to prove that the store is dead along the unwind edge.  We do
+    // this by proving that the caller can't have a reference to the object
+    // after return and thus can't possibly load from the object.  
     Value *Object = GetUnderlyingObject(SomePtr, MDL);
-    // If this is a base pointer we do not understand, simply bail.
-    // We only handle alloca and return value from alloc-like fn right now.
-    if (!isa<AllocaInst>(Object)) {
-      if (!isAllocLikeFn(Object, TLI))
-        return false;
-      // If this is an alloc like fn. There are more constraints we need to
-      // verify. More specifically, we must make sure that the pointer can not
-      // escape.
-      //
-      // NOTE: PointerMayBeCaptured is not enough as the pointer may have
-      // escaped even though its not captured by the enclosing function.
-      // Standard allocation functions like malloc, calloc, and operator new
-      // return values which can be assumed not to have previously escaped.
-      if (PointerMayBeCaptured(Object, true, true))
-        return false;
-      IsKnownNonEscapingObject = true;
-    }
+    if (!isKnownNonEscaping(Object, TLI))
+      return false;
+    // Subtlety: Alloca's aren't visible to callers, but *are* potentially
+    // visible to other threads if captured and used during their lifetimes.
+    IsKnownThreadLocalObject = !isa<AllocaInst>(Object);
   }
 
   // Check that all of the pointers in the alias set have the same type.  We
@@ -1233,8 +1255,7 @@ bool llvm::promoteLoopAccessesToScalars(
   // stores along paths which originally didn't have them without violating the
   // memory model.
   if (!SafeToInsertStore) {
-    // If this is a known non-escaping object, it is safe to insert the stores.
-    if (IsKnownNonEscapingObject)
+    if (IsKnownThreadLocalObject)
       SafeToInsertStore = true;
     else {
       Value *Object = GetUnderlyingObject(SomePtr, MDL);
@@ -1251,9 +1272,11 @@ bool llvm::promoteLoopAccessesToScalars(
   // Otherwise, this is safe to promote, lets do it!
   DEBUG(dbgs() << "LICM: Promoting value stored to in loop: " << *SomePtr
                << '\n');
-  ORE->emit(
-      OptimizationRemark(DEBUG_TYPE, "PromoteLoopAccessesToScalar", LoopUses[0])
-      << "Moving accesses to memory location out of the loop");
+  ORE->emit([&]() {
+    return OptimizationRemark(DEBUG_TYPE, "PromoteLoopAccessesToScalar",
+                              LoopUses[0])
+           << "Moving accesses to memory location out of the loop";
+  });
   ++NumPromoted;
 
   // Grab a debug location for the inserted loads/stores; given that the

@@ -3709,6 +3709,27 @@ void SIInstrInfo::moveToVALU(MachineInstr &TopInst) const {
       splitScalar64BitBinaryOp(Worklist, Inst, AMDGPU::S_XNOR_B32);
       Inst.eraseFromParent();
       continue;
+
+    case AMDGPU::S_BUFFER_LOAD_DWORD_SGPR: {
+      unsigned VDst = MRI.createVirtualRegister(&AMDGPU::VGPR_32RegClass);
+
+      BuildMI(*MBB, Inst, Inst.getDebugLoc(),
+              get(AMDGPU::BUFFER_LOAD_DWORD_OFFEN), VDst)
+        .add(*getNamedOperand(Inst, AMDGPU::OpName::soff)) // vaddr
+        .add(*getNamedOperand(Inst, AMDGPU::OpName::sbase)) // srsrc
+        .addImm(0) // soffset
+        .addImm(0) // offset
+        .addImm(getNamedOperand(Inst, AMDGPU::OpName::glc)->getImm())
+        .addImm(0) // slc
+        .addImm(0) // tfe
+        .setMemRefs(Inst.memoperands_begin(), Inst.memoperands_end());
+
+      MRI.replaceRegWith(getNamedOperand(Inst, AMDGPU::OpName::sdst)->getReg(),
+                         VDst);
+      addUsersToMoveToVALUWorklist(VDst, MRI, Worklist);
+      Inst.eraseFromParent();
+      continue;
+    }
     }
 
     if (NewOpcode == AMDGPU::INSTRUCTION_LIST_END) {
@@ -4371,6 +4392,18 @@ unsigned SIInstrInfo::isStoreToStackSlot(const MachineInstr &MI,
   return AMDGPU::NoRegister;
 }
 
+unsigned SIInstrInfo::getInstBundleSize(const MachineInstr &MI) const {
+  unsigned Size = 0;
+  MachineBasicBlock::const_instr_iterator I = MI.getIterator();
+  MachineBasicBlock::const_instr_iterator E = MI.getParent()->instr_end();
+  while (++I != E && I->isInsideBundle()) {
+    assert(!I->isBundle() && "No nested bundle!");
+    Size += getInstSizeInBytes(*I);
+  }
+
+  return Size;
+}
+
 unsigned SIInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   unsigned Opc = MI.getOpcode();
   const MCInstrDesc &Desc = getMCOpcodeFromPseudo(Opc);
@@ -4414,9 +4447,10 @@ unsigned SIInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case TargetOpcode::IMPLICIT_DEF:
   case TargetOpcode::KILL:
   case TargetOpcode::DBG_VALUE:
-  case TargetOpcode::BUNDLE:
   case TargetOpcode::EH_LABEL:
     return 0;
+  case TargetOpcode::BUNDLE:
+    return getInstBundleSize(MI);
   case TargetOpcode::INLINEASM: {
     const MachineFunction *MF = MI.getParent()->getParent();
     const char *AsmStr = MI.getOperand(0).getSymbolName();
@@ -4577,4 +4611,25 @@ SIInstrInfo::getAddNoCarry(MachineBasicBlock &MBB,
 
   return BuildMI(MBB, I, DL, get(AMDGPU::V_ADD_I32_e64), DestReg)
            .addReg(UnusedCarry, RegState::Define | RegState::Dead);
+}
+
+bool SIInstrInfo::isKillTerminator(unsigned Opcode) {
+  switch (Opcode) {
+  case AMDGPU::SI_KILL_F32_COND_IMM_TERMINATOR:
+  case AMDGPU::SI_KILL_I1_TERMINATOR:
+    return true;
+  default:
+    return false;
+  }
+}
+
+const MCInstrDesc &SIInstrInfo::getKillTerminatorFromPseudo(unsigned Opcode) const {
+  switch (Opcode) {
+  case AMDGPU::SI_KILL_F32_COND_IMM_PSEUDO:
+    return get(AMDGPU::SI_KILL_F32_COND_IMM_TERMINATOR);
+  case AMDGPU::SI_KILL_I1_PSEUDO:
+    return get(AMDGPU::SI_KILL_I1_TERMINATOR);
+  default:
+    llvm_unreachable("invalid opcode, expected SI_KILL_*_PSEUDO");
+  }
 }

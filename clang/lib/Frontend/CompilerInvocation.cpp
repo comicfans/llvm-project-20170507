@@ -546,6 +546,9 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
     OPT_fuse_register_sized_bitfield_access);
   Opts.RelaxedAliasing = Args.hasArg(OPT_relaxed_aliasing);
   Opts.StructPathTBAA = !Args.hasArg(OPT_no_struct_path_tbaa);
+  Opts.FineGrainedBitfieldAccesses =
+      Args.hasFlag(OPT_ffine_grained_bitfield_accesses,
+                   OPT_fno_fine_grained_bitfield_accesses, false);
   Opts.DwarfDebugFlags = Args.getLastArgValue(OPT_dwarf_debug_flags);
   Opts.MergeAllConstants = !Args.hasArg(OPT_fno_merge_all_constants);
   Opts.NoCommon = Args.hasArg(OPT_fno_common);
@@ -836,6 +839,8 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
                    false);
   Opts.SanitizeMinimalRuntime = Args.hasArg(OPT_fsanitize_minimal_runtime);
   Opts.SanitizeCfiCrossDso = Args.hasArg(OPT_fsanitize_cfi_cross_dso);
+  Opts.SanitizeCfiICallGeneralizePointers =
+      Args.hasArg(OPT_fsanitize_cfi_icall_generalize_pointers);
   Opts.SanitizeStats = Args.hasArg(OPT_fsanitize_stats);
   if (Arg *A = Args.getLastArg(OPT_fsanitize_address_use_after_scope,
                                OPT_fno_sanitize_address_use_after_scope)) {
@@ -2138,6 +2143,12 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
     && Opts.OpenCLVersion >= 200);
   Opts.BlocksRuntimeOptional = Args.hasArg(OPT_fblocks_runtime_optional);
   Opts.CoroutinesTS = Args.hasArg(OPT_fcoroutines_ts);
+  
+  // Enable [[]] attributes in C++11 by default.
+  Opts.DoubleSquareBracketAttributes =
+      Args.hasFlag(OPT_fdouble_square_bracket_attributes,
+                   OPT_fno_double_square_bracket_attributes, Opts.CPlusPlus11);
+
   Opts.ModulesTS = Args.hasArg(OPT_fmodules_ts);
   Opts.Modules = Args.hasArg(OPT_fmodules) || Opts.ModulesTS;
   Opts.ModulesStrictDeclUse = Args.hasArg(OPT_fmodules_strict_decluse);
@@ -2154,7 +2165,16 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.ImplicitModules = !Args.hasArg(OPT_fno_implicit_modules);
   Opts.CharIsSigned = Opts.OpenCL || !Args.hasArg(OPT_fno_signed_char);
   Opts.WChar = Opts.CPlusPlus && !Args.hasArg(OPT_fno_wchar);
-  Opts.ShortWChar = Args.hasFlag(OPT_fshort_wchar, OPT_fno_short_wchar, false);
+  if (const Arg *A = Args.getLastArg(OPT_fwchar_type_EQ)) {
+    Opts.WCharSize = llvm::StringSwitch<unsigned>(A->getValue())
+                         .Case("char", 1)
+                         .Case("short", 2)
+                         .Case("int", 4)
+                         .Default(0);
+    if (Opts.WCharSize == 0)
+      Diags.Report(diag::err_fe_invalid_wchar_type) << A->getValue();
+  }
+  Opts.WCharIsSigned = Args.hasFlag(OPT_fsigned_wchar, OPT_fno_signed_wchar, true);
   Opts.ShortEnums = Args.hasArg(OPT_fshort_enums);
   Opts.Freestanding = Args.hasArg(OPT_ffreestanding);
   Opts.NoBuiltin = Args.hasArg(OPT_fno_builtin) || Opts.Freestanding;
@@ -2747,6 +2767,13 @@ bool CompilerInvocation::CreateFromArgs(CompilerInvocation &Res,
   auto Arch = T.getArch();
   if (Arch == llvm::Triple::spir || Arch == llvm::Triple::spir64) {
     Res.getDiagnosticOpts().Warnings.push_back("spir-compat");
+  }
+
+  // If sanitizer is enabled, disable OPT_ffine_grained_bitfield_accesses.
+  if (Res.getCodeGenOpts().FineGrainedBitfieldAccesses &&
+      !Res.getLangOpts()->Sanitize.empty()) {
+    Res.getCodeGenOpts().FineGrainedBitfieldAccesses = false;
+    Diags.Report(diag::warn_drv_fine_grained_bitfield_accesses_ignored);
   }
   return Success;
 }

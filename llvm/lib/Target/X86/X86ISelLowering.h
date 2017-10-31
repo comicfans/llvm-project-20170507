@@ -569,7 +569,7 @@ namespace llvm {
 
       /// LOCK-prefixed arithmetic read-modify-write instructions.
       /// EFLAGS, OUTCHAIN = LADD(INCHAIN, PTR, RHS)
-      LADD, LSUB, LOR, LXOR, LAND,
+      LADD, LSUB, LOR, LXOR, LAND, LINC, LDEC,
 
       // Load, scalar_to_vector, and zero extend.
       VZEXT_LOAD,
@@ -724,19 +724,6 @@ namespace llvm {
                             SelectionDAG &DAG) const override;
 
     SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
-
-    // Return true if it is profitable to combine a BUILD_VECTOR to a TRUNCATE
-    // for given operand and result types.
-    // Example of such a combine:
-    // v4i32 build_vector((extract_elt V, 0),
-    //                    (extract_elt V, 2),
-    //                    (extract_elt V, 4),
-    //                    (extract_elt V, 6))
-    //  -->
-    // v4i32 truncate (bitcast V to v4i64)
-    bool isDesirableToCombineBuildVectorToTruncate() const override {
-      return true;
-    }
 
     // Return true if it is profitable to combine a BUILD_VECTOR with a
     // stride-pattern to a shuffle and a truncate.
@@ -1189,6 +1176,7 @@ namespace llvm {
     SDValue LowerWin64_i128OP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGC_TRANSITION_START(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGC_TRANSITION_END(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
 
     SDValue
     LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,

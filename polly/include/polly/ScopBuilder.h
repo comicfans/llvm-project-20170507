@@ -229,6 +229,18 @@ class ScopBuilder {
   /// @returns True if the instruction should be modeled.
   bool shouldModelInst(Instruction *Inst, Loop *L);
 
+  /// Create one or more ScopStmts for @p BB.
+  ///
+  /// Consecutive instructions are associated to the same statement until a
+  /// separator is found.
+  void buildSequentialBlockStmts(BasicBlock *BB);
+
+  /// Create one or more ScopStmts for @p BB using equivalence classes.
+  ///
+  /// Instructions of a basic block that belong to the same equivalence class
+  /// are added to the same statement.
+  void buildEqivClassBlockStmts(BasicBlock *BB);
+
   /// Create ScopStmt for all BBs and non-affine subregions of @p SR.
   ///
   /// @param SR A subregion of @p R.
@@ -243,10 +255,8 @@ class ScopBuilder {
   /// @param Stmt               Statement to add MemoryAccesses to.
   /// @param BB                 A basic block in @p R.
   /// @param NonAffineSubRegion The non affine sub-region @p BB is in.
-  /// @param IsExitBlock        Flag to indicate that @p BB is in the exit BB.
   void buildAccessFunctions(ScopStmt *Stmt, BasicBlock &BB,
-                            Region *NonAffineSubRegion = nullptr,
-                            bool IsExitBlock = false);
+                            Region *NonAffineSubRegion = nullptr);
 
   /// Create a new MemoryAccess object and add it to #AccFuncMap.
   ///

@@ -18,14 +18,16 @@
 #define XRAY_XRAY_FDR_LOGGING_IMPL_H
 
 #include <cassert>
-#include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <limits>
-#include <memory>
-#include <string>
+#include <pthread.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+// FIXME: Implement analogues to std::shared_ptr and std::weak_ptr
+#include <memory>
 
 #include "sanitizer_common/sanitizer_common.h"
 #include "xray/xray_log_interface.h"
@@ -92,8 +94,10 @@ static void writeEOBMetadata();
 static void writeTSCWrapMetadata(uint64_t TSC);
 
 // Group together thread-local-data in a struct, then hide it behind a function
-// call so that it can be initialized on first use instead of as a global.
-struct ThreadLocalData {
+// call so that it can be initialized on first use instead of as a global. We
+// force the alignment to 64-bytes for x86 cache line alignment, as this
+// structure is used in the hot path of implementation.
+struct alignas(64) ThreadLocalData {
   BufferQueue::Buffer Buffer;
   char *RecordPtr = nullptr;
   // The number of FunctionEntry records immediately preceding RecordPtr.
@@ -124,43 +128,95 @@ static ThreadLocalData &getThreadLocalData();
 static constexpr auto MetadataRecSize = sizeof(MetadataRecord);
 static constexpr auto FunctionRecSize = sizeof(FunctionRecord);
 
-class ThreadExitBufferCleanup {
-  std::shared_ptr<BufferQueue> &Buffers;
-  BufferQueue::Buffer &Buffer;
-
-public:
-  explicit ThreadExitBufferCleanup(std::shared_ptr<BufferQueue> &BQ,
-                                   BufferQueue::Buffer &Buffer)
-      XRAY_NEVER_INSTRUMENT : Buffers(BQ),
-                              Buffer(Buffer) {}
-
-  ~ThreadExitBufferCleanup() noexcept XRAY_NEVER_INSTRUMENT {
-    auto &TLD = getThreadLocalData();
-    auto &RecordPtr = TLD.RecordPtr;
-    if (RecordPtr == nullptr)
-      return;
-
-    // We make sure that upon exit, a thread will write out the EOB
-    // MetadataRecord in the thread-local log, and also release the buffer to
-    // the queue.
-    assert((RecordPtr + MetadataRecSize) - static_cast<char *>(Buffer.Buffer) >=
-           static_cast<ptrdiff_t>(MetadataRecSize));
-    if (Buffers) {
-      writeEOBMetadata();
-      auto EC = Buffers->releaseBuffer(Buffer);
-      if (EC != BufferQueue::ErrorCode::Ok)
-        Report("Failed to release buffer at %p; error=%s\n", Buffer.Buffer,
-               BufferQueue::getErrorString(EC));
-      Buffers = nullptr;
-      return;
-    }
-  }
-};
-
+// This function will initialize the thread-local data structure used by the FDR
+// logging implementation and return a reference to it. The implementation
+// details require a bit of care to maintain.
+//
+// First, some requirements on the implementation in general:
+//
+//   - XRay handlers should not call any memory allocation routines that may
+//     delegate to an instrumented implementation. This means functions like
+//     malloc() and free() should not be called while instrumenting.
+//
+//   - We would like to use some thread-local data initialized on first-use of
+//     the XRay instrumentation. These allow us to implement unsynchronized
+//     routines that access resources associated with the thread.
+//
+// The implementation here uses a few mechanisms that allow us to provide both
+// the requirements listed above. We do this by:
+//
+//   1. Using a thread-local aligned storage buffer for representing the
+//      ThreadLocalData struct. This data will be uninitialized memory by
+//      design.
+//
+//   2. Using pthread_once(...) to initialize the thread-local data structures
+//      on first use, for every thread. We don't use std::call_once so we don't
+//      have a reliance on the C++ runtime library.
+//
+//   3. Registering a cleanup function that gets run at the end of a thread's
+//      lifetime through pthread_create_key(...). The cleanup function would
+//      allow us to release the thread-local resources in a manner that would
+//      let the rest of the XRay runtime implementation handle the records
+//      written for this thread's active buffer.
+//
+// We're doing this to avoid using a `thread_local` object that has a
+// non-trivial destructor, because the C++ runtime might call std::malloc(...)
+// to register calls to destructors. Deadlocks may arise when, for example, an
+// externally provided malloc implementation is XRay instrumented, and
+// initializing the thread-locals involves calling into malloc. A malloc
+// implementation that does global synchronization might be holding a lock for a
+// critical section, calling a function that might be XRay instrumented (and
+// thus in turn calling into malloc by virtue of registration of the
+// thread_local's destructor).
+//
+// With the approach taken where, we attempt to avoid the potential for
+// deadlocks by relying instead on pthread's memory management routines.
 static ThreadLocalData &getThreadLocalData() {
-  thread_local ThreadLocalData TLD;
-  thread_local ThreadExitBufferCleanup Cleanup(TLD.LocalBQ, TLD.Buffer);
-  return TLD;
+  thread_local pthread_key_t key;
+
+  // We need aligned, uninitialized storage for the TLS object which is
+  // trivially destructible. We're going to use this as raw storage and
+  // placement-new the ThreadLocalData object into it later.
+  alignas(alignof(ThreadLocalData)) thread_local unsigned char
+      TLSBuffer[sizeof(ThreadLocalData)];
+
+  // Ensure that we only actually ever do the pthread initialization once.
+  thread_local bool UNUSED Unused = [] {
+    new (&TLSBuffer) ThreadLocalData();
+    auto result = pthread_key_create(&key, +[](void *) {
+      auto &TLD = *reinterpret_cast<ThreadLocalData *>(&TLSBuffer);
+      auto &RecordPtr = TLD.RecordPtr;
+      auto &Buffers = TLD.LocalBQ;
+      auto &Buffer = TLD.Buffer;
+      if (RecordPtr == nullptr)
+        return;
+
+      // We make sure that upon exit, a thread will write out the EOB
+      // MetadataRecord in the thread-local log, and also release the buffer
+      // to the queue.
+      assert((RecordPtr + MetadataRecSize) -
+                 static_cast<char *>(Buffer.Buffer) >=
+             static_cast<ptrdiff_t>(MetadataRecSize));
+      if (Buffers) {
+        writeEOBMetadata();
+        auto EC = Buffers->releaseBuffer(Buffer);
+        if (EC != BufferQueue::ErrorCode::Ok)
+          Report("Failed to release buffer at %p; error=%s\n", Buffer.Buffer,
+                 BufferQueue::getErrorString(EC));
+        Buffers = nullptr;
+        return;
+      }
+    });
+    if (result != 0) {
+      Report("Failed to allocate thread-local data through pthread; error=%d",
+             result);
+      return false;
+    }
+    pthread_setspecific(key, &TLSBuffer);
+    return true;
+  }();
+
+  return *reinterpret_cast<ThreadLocalData *>(TLSBuffer);
 }
 
 //-----------------------------------------------------------------------------|
@@ -200,14 +256,15 @@ public:
 inline void writeNewBufferPreamble(pid_t Tid, timespec TS,
                                    char *&MemPtr) XRAY_NEVER_INSTRUMENT {
   static constexpr int InitRecordsCount = 2;
-  std::aligned_storage<sizeof(MetadataRecord)>::type Records[InitRecordsCount];
+  alignas(alignof(MetadataRecord)) unsigned char
+      Records[InitRecordsCount * MetadataRecSize];
   {
     // Write out a MetadataRecord to signify that this is the start of a new
     // buffer, associated with a particular thread, with a new CPU.  For the
     // data, we have 15 bytes to squeeze as much information as we can.  At this
     // point we only write down the following bytes:
     //   - Thread ID (pid_t, 4 bytes)
-    auto &NewBuffer = *reinterpret_cast<MetadataRecord *>(&Records[0]);
+    auto &NewBuffer = *reinterpret_cast<MetadataRecord *>(Records);
     NewBuffer.Type = uint8_t(RecordType::Metadata);
     NewBuffer.RecordKind = uint8_t(MetadataRecord::RecordKinds::NewBuffer);
     std::memcpy(&NewBuffer.Data, &Tid, sizeof(pid_t));
@@ -215,7 +272,8 @@ inline void writeNewBufferPreamble(pid_t Tid, timespec TS,
   // Also write the WalltimeMarker record.
   {
     static_assert(sizeof(time_t) <= 8, "time_t needs to be at most 8 bytes");
-    auto &WalltimeMarker = *reinterpret_cast<MetadataRecord *>(&Records[1]);
+    auto &WalltimeMarker =
+        *reinterpret_cast<MetadataRecord *>(Records + MetadataRecSize);
     WalltimeMarker.Type = uint8_t(RecordType::Metadata);
     WalltimeMarker.RecordKind =
         uint8_t(MetadataRecord::RecordKinds::WalltimeMarker);
@@ -327,10 +385,7 @@ static inline void writeCallArgumentMetadata(uint64_t A) XRAY_NEVER_INSTRUMENT {
 static inline void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
                                        XRayEntryType EntryType,
                                        char *&MemPtr) XRAY_NEVER_INSTRUMENT {
-  std::aligned_storage<sizeof(FunctionRecord), alignof(FunctionRecord)>::type
-      AlignedFuncRecordBuffer;
-  auto &FuncRecord =
-      *reinterpret_cast<FunctionRecord *>(&AlignedFuncRecordBuffer);
+  FunctionRecord FuncRecord;
   FuncRecord.Type = uint8_t(RecordType::Function);
   // Only take 28 bits of the function id.
   FuncRecord.FuncId = FuncId & ~(0x0F << 28);
@@ -384,7 +439,7 @@ static inline void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
   }
   }
 
-  std::memcpy(MemPtr, &AlignedFuncRecordBuffer, sizeof(FunctionRecord));
+  std::memcpy(MemPtr, &FuncRecord, sizeof(FunctionRecord));
   MemPtr += sizeof(FunctionRecord);
 }
 
@@ -401,14 +456,10 @@ static uint64_t thresholdTicks() {
 // "Function Entry" record and any "Tail Call Exit" records after that.
 static void rewindRecentCall(uint64_t TSC, uint64_t &LastTSC,
                              uint64_t &LastFunctionEntryTSC, int32_t FuncId) {
-  using AlignedFuncStorage =
-      std::aligned_storage<sizeof(FunctionRecord),
-                           alignof(FunctionRecord)>::type;
   auto &TLD = getThreadLocalData();
   TLD.RecordPtr -= FunctionRecSize;
-  AlignedFuncStorage AlignedFuncRecordBuffer;
-  const auto &FuncRecord = *reinterpret_cast<FunctionRecord *>(
-      std::memcpy(&AlignedFuncRecordBuffer, TLD.RecordPtr, FunctionRecSize));
+  FunctionRecord FuncRecord;
+  std::memcpy(&FuncRecord, TLD.RecordPtr, FunctionRecSize);
   assert(FuncRecord.RecordKind ==
              uint8_t(FunctionRecord::RecordKinds::FunctionEnter) &&
          "Expected to find function entry recording when rewinding.");
@@ -430,20 +481,17 @@ static void rewindRecentCall(uint64_t TSC, uint64_t &LastTSC,
   auto RewindingTSC = LastTSC;
   auto RewindingRecordPtr = TLD.RecordPtr - FunctionRecSize;
   while (TLD.NumTailCalls > 0) {
-    AlignedFuncStorage TailExitRecordBuffer;
     // Rewind the TSC back over the TAIL EXIT record.
-    const auto &ExpectedTailExit =
-        *reinterpret_cast<FunctionRecord *>(std::memcpy(
-            &TailExitRecordBuffer, RewindingRecordPtr, FunctionRecSize));
+    FunctionRecord ExpectedTailExit;
+    std::memcpy(&ExpectedTailExit, RewindingRecordPtr, FunctionRecSize);
 
     assert(ExpectedTailExit.RecordKind ==
                uint8_t(FunctionRecord::RecordKinds::FunctionTailExit) &&
            "Expected to find tail exit when rewinding.");
     RewindingRecordPtr -= FunctionRecSize;
     RewindingTSC -= ExpectedTailExit.TSCDelta;
-    AlignedFuncStorage FunctionEntryBuffer;
-    const auto &ExpectedFunctionEntry = *reinterpret_cast<FunctionRecord *>(
-        std::memcpy(&FunctionEntryBuffer, RewindingRecordPtr, FunctionRecSize));
+    FunctionRecord ExpectedFunctionEntry;
+    std::memcpy(&ExpectedFunctionEntry, RewindingRecordPtr, FunctionRecSize);
     assert(ExpectedFunctionEntry.RecordKind ==
                uint8_t(FunctionRecord::RecordKinds::FunctionEnter) &&
            "Expected to find function entry when rewinding tail call.");
@@ -477,7 +525,8 @@ inline bool releaseThreadLocalBuffer(BufferQueue &BQArg) {
   return true;
 }
 
-inline bool prepareBuffer(int (*wall_clock_reader)(clockid_t,
+inline bool prepareBuffer(uint64_t TSC, unsigned char CPU,
+                          int (*wall_clock_reader)(clockid_t,
                                                    struct timespec *),
                           size_t MaxSize) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
@@ -494,6 +543,9 @@ inline bool prepareBuffer(int (*wall_clock_reader)(clockid_t,
       return false;
     }
     setupNewBuffer(wall_clock_reader);
+
+    // Always write the CPU metadata as the first record in the buffer.
+    writeNewCPUIdMetadata(CPU, TSC);
   }
   return true;
 }
@@ -544,6 +596,9 @@ inline bool isLogInitializedAndReady(
     }
 
     setupNewBuffer(wall_clock_reader);
+
+    // Always write the CPU metadata as the first record in the buffer.
+    writeNewCPUIdMetadata(CPU, TSC);
   }
 
   if (TLD.CurrentCPU == std::numeric_limits<uint16_t>::max()) {
@@ -673,7 +728,7 @@ inline void processFunctionHook(
   // bytes in the end of the buffer, we need to write out the EOB, get a new
   // Buffer, set it up properly before doing any further writing.
   size_t MaxSize = FunctionRecSize + 2 * MetadataRecSize;
-  if (!prepareBuffer(wall_clock_reader, MaxSize)) {
+  if (!prepareBuffer(TSC, CPU, wall_clock_reader, MaxSize)) {
     TLD.LocalBQ = nullptr;
     return;
   }

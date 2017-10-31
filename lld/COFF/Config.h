@@ -27,7 +27,6 @@ using llvm::StringRef;
 class DefinedAbsolute;
 class DefinedRelative;
 class StringChunk;
-struct Symbol;
 class SymbolBody;
 
 // Short aliases.
@@ -84,10 +83,8 @@ struct Configuration {
   bool NoEntry = false;
   std::string OutputFile;
   std::string ImportName;
-  bool ColorDiagnostics;
   bool DoGC = true;
   bool DoICF = true;
-  uint64_t ErrorLimit = 20;
   bool Relocatable = true;
   bool Force = false;
   bool Debug = false;
@@ -113,8 +110,8 @@ struct Configuration {
   bool SaveTemps = false;
 
   // Used for SafeSEH.
-  Symbol *SEHTable = nullptr;
-  Symbol *SEHCount = nullptr;
+  SymbolBody *SEHTable = nullptr;
+  SymbolBody *SEHCount = nullptr;
 
   // Used for /opt:lldlto=N
   unsigned LTOOptLevel = 2;
@@ -166,6 +163,7 @@ struct Configuration {
   uint32_t MinorImageVersion = 0;
   uint32_t MajorOSVersion = 6;
   uint32_t MinorOSVersion = 0;
+  bool CanExitEarly = false;
   bool DynamicBase = true;
   bool AllowBind = true;
   bool NxCompat = true;
