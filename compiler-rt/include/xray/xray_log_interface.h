@@ -83,6 +83,11 @@
 #include "xray/xray_interface.h"
 #include <stddef.h>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 extern "C" {
 
 /// This enum defines the valid states in which the logging implementation can
@@ -223,10 +228,16 @@ XRayLogFlushStatus __xray_log_flushLog();
 
 namespace __xray {
 
+#ifndef _WIN32
+	typedef int FileDescription;
+#else
+	typedef HANDLE FileDescription;
+#endif
+
 // Options used by the LLVM XRay FDR implementation.
 struct FDRLoggingOptions {
   bool ReportErrors = false;
-  int Fd = -1;
+  FileDescription Fd = FileDescription(-1);
 };
 
 } // namespace __xray

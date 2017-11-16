@@ -1,4 +1,3 @@
-#include "cpuid.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "xray_defs.h"
 #include "xray_interface_internal.h"
@@ -10,10 +9,17 @@
 #include <iterator>
 #include <limits>
 #include <tuple>
-#include <unistd.h>
+
+#if defined(_MSC_VER)
+#include<intrin.h>
+#define NOMINMAX
+#include<windows.h>
+typedef __int64 ssize_t;
+#endif
 
 namespace __xray {
 
+#ifndef _WIN32
 static std::pair<ssize_t, bool>
 retryingReadSome(int Fd, char *Begin, char *End) XRAY_NEVER_INSTRUMENT {
   auto BytesToRead = std::distance(Begin, End);
@@ -56,8 +62,10 @@ static bool readValueFromFile(const char *Filename,
   }
   return Result;
 }
+#endif
 
 uint64_t getTSCFrequency() XRAY_NEVER_INSTRUMENT {
+#ifndef _WIN32
   long long TSCFrequency = -1;
   if (readValueFromFile("/sys/devices/system/cpu/cpu0/tsc_freq_khz",
                         &TSCFrequency)) {
@@ -70,6 +78,11 @@ uint64_t getTSCFrequency() XRAY_NEVER_INSTRUMENT {
     Report("Unable to determine CPU frequency for TSC accounting.\n");
   }
   return TSCFrequency == -1 ? 0 : static_cast<uint64_t>(TSCFrequency);
+#else
+	LARGE_INTEGER value;
+	QueryPerformanceFrequency(&value);
+	return value.QuadPart;
+#endif
 }
 
 static constexpr uint8_t CallOpCode = 0xe8;
@@ -254,12 +267,18 @@ bool patchCustomEvent(const bool Enable, const uint32_t FuncId,
 // We determine whether the CPU we're running on has the correct features we
 // need. In x86_64 this will be rdtscp support.
 bool probeRequiredCPUFeatures() XRAY_NEVER_INSTRUMENT {
-  unsigned int EAX, EBX, ECX, EDX;
 
+  unsigned int EAX, EBX, ECX, EDX;
   // We check whether rdtscp support is enabled. According to the x86_64 manual,
   // level should be set at 0x80000001, and we should have a look at bit 27 in
   // EDX. That's 0x8000000 (or 1u << 27).
+#ifndef _WIN32
   __get_cpuid(0x80000001, &EAX, &EBX, &ECX, &EDX);
+#else
+	int ABCD[4];
+  __cpuid(ABCD ,0x80000001 );
+  EDX = ABCD[3];
+#endif
   if (!(EDX & (1u << 27))) {
     Report("Missing rdtscp support.\n");
     return false;

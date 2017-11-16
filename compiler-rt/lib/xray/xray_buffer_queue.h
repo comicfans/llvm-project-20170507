@@ -29,7 +29,7 @@ namespace __xray {
 class BufferQueue {
  public:
   struct Buffer {
-    void *Buffer = nullptr;
+    void *Data = nullptr;
     size_t Size = 0;
   };
 

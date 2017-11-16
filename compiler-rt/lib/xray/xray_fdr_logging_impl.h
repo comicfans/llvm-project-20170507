@@ -21,10 +21,7 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
-#include <pthread.h>
-#include <sys/syscall.h>
 #include <time.h>
-#include <unistd.h>
 
 // FIXME: Implement analogues to std::shared_ptr and std::weak_ptr
 #include <memory>
@@ -36,6 +33,22 @@
 #include "xray_fdr_log_records.h"
 #include "xray_flags.h"
 #include "xray_tsc.h"
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+#ifdef _WIN32
+typedef int clockid_t;
+#endif
+
+typedef int (*wall_clock_reader_func)(clockid_t ,timespec *);
+
+#ifdef _WIN32
+int clock_gettime(clockid_t,timespec *);
+#endif
+
 
 namespace __xray {
 
@@ -80,8 +93,7 @@ static void writeFunctionRecord(int FuncId, uint32_t TSCDelta,
 
 /// Sets up a new buffer in thread_local storage and writes a preamble. The
 /// wall_clock_reader function is used to populate the WallTimeRecord entry.
-static void setupNewBuffer(int (*wall_clock_reader)(clockid_t,
-                                                    struct timespec *));
+static void setupNewBuffer(wall_clock_reader_func wall_clock_reader);
 
 /// Called to record CPU time for a new CPU within the current thread.
 static void writeNewCPUIdMetadata(uint16_t CPU, uint64_t TSC);
@@ -171,18 +183,36 @@ static constexpr auto FunctionRecSize = sizeof(FunctionRecord);
 //
 // With the approach taken where, we attempt to avoid the potential for
 // deadlocks by relying instead on pthread's memory management routines.
+
+/*
+void NTAPI on_tls_callback(PVOID h, DWORD dwReason, PVOID pv)
+{
+    if( DLL_THREAD_DETACH == dwReason )
+        basic_tls::thread_term();
+}
+
+// put a pointer in a special segment
+#pragma data_seg(".CRT$XLB")
+PIMAGE_TLS_CALLBACK p_thread_callback = on_tls_callback;
+#pragma data_seg()
+*/
+
 static ThreadLocalData &getThreadLocalData() {
+#ifndef _WIN32
   thread_local pthread_key_t key;
+#else
+#endif
 
   // We need aligned, uninitialized storage for the TLS object which is
   // trivially destructible. We're going to use this as raw storage and
   // placement-new the ThreadLocalData object into it later.
-  alignas(alignof(ThreadLocalData)) thread_local unsigned char
+  __declspec(align(alignof(ThreadLocalData))) thread_local unsigned char
       TLSBuffer[sizeof(ThreadLocalData)];
 
   // Ensure that we only actually ever do the pthread initialization once.
   thread_local bool UNUSED Unused = [] {
     new (&TLSBuffer) ThreadLocalData();
+	/*
     auto result = pthread_key_create(&key, +[](void *) {
       auto &TLD = *reinterpret_cast<ThreadLocalData *>(&TLSBuffer);
       auto &RecordPtr = TLD.RecordPtr;
@@ -195,13 +225,13 @@ static ThreadLocalData &getThreadLocalData() {
       // MetadataRecord in the thread-local log, and also release the buffer
       // to the queue.
       assert((RecordPtr + MetadataRecSize) -
-                 static_cast<char *>(Buffer.Buffer) >=
+                 static_cast<char *>(Buffer.Data) >=
              static_cast<ptrdiff_t>(MetadataRecSize));
       if (Buffers) {
         writeEOBMetadata();
         auto EC = Buffers->releaseBuffer(Buffer);
         if (EC != BufferQueue::ErrorCode::Ok)
-          Report("Failed to release buffer at %p; error=%s\n", Buffer.Buffer,
+          Report("Failed to release buffer at %p; error=%s\n", Buffer.Data,
                  BufferQueue::getErrorString(EC));
         Buffers = nullptr;
         return;
@@ -213,6 +243,7 @@ static ThreadLocalData &getThreadLocalData() {
       return false;
     }
     pthread_setspecific(key, &TLSBuffer);
+	*/
     return true;
   }();
 
@@ -293,16 +324,15 @@ inline void writeNewBufferPreamble(pid_t Tid, timespec TS,
   TLD.NumTailCalls = 0;
 }
 
-inline void setupNewBuffer(int (*wall_clock_reader)(
-    clockid_t, struct timespec *)) XRAY_NEVER_INSTRUMENT {
+inline void setupNewBuffer(wall_clock_reader_func wall_clock_reader) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
   auto &Buffer = TLD.Buffer;
   auto &RecordPtr = TLD.RecordPtr;
-  RecordPtr = static_cast<char *>(Buffer.Buffer);
-  pid_t Tid = syscall(SYS_gettid);
+  RecordPtr = static_cast<char *>(Buffer.Data);
+  pid_t Tid = GetCurrentThreadId();
   timespec TS{0, 0};
   // This is typically clock_gettime, but callers have injection ability.
-  wall_clock_reader(CLOCK_MONOTONIC, &TS);
+  wall_clock_reader(0,&TS);
   writeNewBufferPreamble(Tid, TS, RecordPtr);
   TLD.NumConsecutiveFnEnters = 0;
   TLD.NumTailCalls = 0;
@@ -518,7 +548,7 @@ inline bool releaseThreadLocalBuffer(BufferQueue &BQArg) {
   auto &TLD = getThreadLocalData();
   auto EC = BQArg.releaseBuffer(TLD.Buffer);
   if (EC != BufferQueue::ErrorCode::Ok) {
-    Report("Failed to release buffer at %p; error=%s\n", TLD.Buffer.Buffer,
+    Report("Failed to release buffer at %p; error=%s\n", TLD.Buffer.Data,
            BufferQueue::getErrorString(EC));
     return false;
   }
@@ -526,11 +556,10 @@ inline bool releaseThreadLocalBuffer(BufferQueue &BQArg) {
 }
 
 inline bool prepareBuffer(uint64_t TSC, unsigned char CPU,
-                          int (*wall_clock_reader)(clockid_t,
-                                                   struct timespec *),
+                          wall_clock_reader_func wall_clock_reader,
                           size_t MaxSize) XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
-  char *BufferStart = static_cast<char *>(TLD.Buffer.Buffer);
+  char *BufferStart = static_cast<char *>(TLD.Buffer.Data);
   if ((TLD.RecordPtr + MaxSize) >
       (BufferStart + TLD.Buffer.Size - MetadataRecSize)) {
     writeEOBMetadata();
@@ -552,8 +581,7 @@ inline bool prepareBuffer(uint64_t TSC, unsigned char CPU,
 
 inline bool isLogInitializedAndReady(
     std::shared_ptr<BufferQueue> &LBQ, uint64_t TSC, unsigned char CPU,
-    int (*wall_clock_reader)(clockid_t,
-                             struct timespec *)) XRAY_NEVER_INSTRUMENT {
+    wall_clock_reader_func wall_clock_reader) XRAY_NEVER_INSTRUMENT {
   // Bail out right away if logging is not initialized yet.
   // We should take the opportunity to release the buffer though.
   auto Status = __sanitizer::atomic_load(&LoggingStatus,
@@ -583,7 +611,7 @@ inline bool isLogInitializedAndReady(
     TLD.RecordPtr = nullptr;
   }
 
-  if (TLD.Buffer.Buffer == nullptr) {
+  if (TLD.Buffer.Data == nullptr) {
     auto EC = LBQ->getBuffer(TLD.Buffer);
     if (EC != BufferQueue::ErrorCode::Ok) {
       auto LS = __sanitizer::atomic_load(&LoggingStatus,
@@ -649,7 +677,7 @@ inline uint32_t writeCurrentCPUTSC(ThreadLocalData &TLD, uint64_t TSC,
 
 inline void endBufferIfFull() XRAY_NEVER_INSTRUMENT {
   auto &TLD = getThreadLocalData();
-  auto BufferStart = static_cast<char *>(TLD.Buffer.Buffer);
+  auto BufferStart = static_cast<char *>(TLD.Buffer.Data);
   if ((TLD.RecordPtr + MetadataRecSize) - BufferStart == MetadataRecSize) {
     writeEOBMetadata();
     if (!releaseThreadLocalBuffer(*TLD.LocalBQ))
@@ -668,8 +696,8 @@ thread_local volatile bool Running = false;
 /// buffer.
 inline void processFunctionHook(
     int32_t FuncId, XRayEntryType Entry, uint64_t TSC, unsigned char CPU,
-    uint64_t Arg1, int (*wall_clock_reader)(clockid_t, struct timespec *),
-    const std::shared_ptr<BufferQueue> &BQ) XRAY_NEVER_INSTRUMENT {
+    uint64_t Arg1, wall_clock_reader_func wall_clock_reader,
+    const std::shared_ptr<__xray::BufferQueue> &BQ) XRAY_NEVER_INSTRUMENT {
   // Prevent signal handler recursion, so in case we're already in a log writing
   // mode and the signal handler comes in (and is also instrumented) then we
   // don't want to be clobbering potentially partial writes already happening in
@@ -734,7 +762,7 @@ inline void processFunctionHook(
   }
 
   // By this point, we are now ready to write up to 40 bytes (explained above).
-  assert((TLD.RecordPtr + MaxSize) - static_cast<char *>(TLD.Buffer.Buffer) >=
+  assert((TLD.RecordPtr + MaxSize) - static_cast<char *>(TLD.Buffer.Data) >=
              static_cast<ptrdiff_t>(MetadataRecSize) &&
          "Misconfigured BufferQueue provided; Buffer size not large enough.");
 

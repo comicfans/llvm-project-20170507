@@ -35,24 +35,27 @@ struct alignas(16) MetadataRecord {
   // Use 7 bits to identify this record type.
   /* RecordKinds */ uint8_t RecordKind : 7;
   char Data[15];
-} __attribute__((packed));
+};
+//__attribute__((packed));
 
 static_assert(sizeof(MetadataRecord) == 16, "Wrong size for MetadataRecord.");
 
+
+#pragma pack(push,1)
 struct alignas(8) FunctionRecord {
   // A FunctionRecord must always have a type of 0.
-  /* RecordType */ uint8_t Type : 1;
+  /* RecordType */ uint32_t Type : 1;
   enum class RecordKinds {
     FunctionEnter = 0x00,
     FunctionExit = 0x01,
     FunctionTailExit = 0x02,
   };
-  /* RecordKinds */ uint8_t RecordKind : 3;
+  /* RecordKinds */ uint32_t RecordKind : 3;
 
   // We only use 28 bits of the function ID, so that we can use as few bytes as
   // possible. This means we only support 2^28 (268,435,456) unique function ids
   // in a single binary.
-  int FuncId : 28;
+  uint32_t FuncId : 28;
 
   // We use another 4 bytes to hold the delta between the previous entry's TSC.
   // In case we've found that the distance is greater than the allowable 32 bits
@@ -60,7 +63,15 @@ struct alignas(8) FunctionRecord {
   // different then), we should use a MetadataRecord before this FunctionRecord
   // that will contain the full TSC for that CPU, and keep this to 0.
   uint32_t TSCDelta;
-} __attribute__((packed));
+} 
+#pragma pack(pop)
+#ifndef _WIN32
+#pragma  pack(show ,FunctionRecord)
+__attribute__((packed));
+#else
+;
+#endif
+
 
 static_assert(sizeof(FunctionRecord) == 8, "Wrong size for FunctionRecord.");
 

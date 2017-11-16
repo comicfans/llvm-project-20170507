@@ -19,11 +19,10 @@
 #include <cstring>
 #include <errno.h>
 #include <fcntl.h>
+#include <chrono>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "sanitizer_common/sanitizer_libc.h"
 #include "xray/xray_records.h"
@@ -32,6 +31,10 @@
 #include "xray_interface_internal.h"
 #include "xray_tsc.h"
 #include "xray_utils.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 // __xray_InMemoryRawLog will use a thread-local aligned buffer capped to a
 // certain size (32kb by default) and use it as if it were a circular buffer for
@@ -47,12 +50,12 @@ namespace __xray {
 __sanitizer::SpinMutex LogMutex;
 
 class ThreadExitFlusher {
-  int Fd;
+  FileDescription Fd;
   XRayRecord *Start;
   size_t &Offset;
 
 public:
-  explicit ThreadExitFlusher(int Fd, XRayRecord *Start,
+  explicit ThreadExitFlusher(FileDescription Fd, XRayRecord *Start,
                              size_t &Offset) XRAY_NEVER_INSTRUMENT
       : Fd(Fd),
         Start(Start),
@@ -67,7 +70,7 @@ public:
       // file and that we're not able to close out the file properly, we sync
       // instead and hope that the pending writes are flushed as the thread
       // exits.
-      fsync(Fd);
+	  FlushFileBuffers(Fd);
     }
   }
 };
@@ -76,10 +79,10 @@ public:
 
 using namespace __xray;
 
-static int __xray_OpenLogFile() XRAY_NEVER_INSTRUMENT {
-  int F = getLogFD();
-  if (F == -1)
-    return -1;
+static FileDescription __xray_OpenLogFile() XRAY_NEVER_INSTRUMENT {
+  FileDescription F = getLogFD();
+  if (F == FileDescription(-1))
+    return FileDescription(-1);
 
   // Test for required CPU features and cache the cycle frequency
   static bool TSCSupported = probeRequiredCPUFeatures();
@@ -115,12 +118,17 @@ Buffer (&getThreadLocalBuffer())[BuffLen] XRAY_NEVER_INSTRUMENT {
 }
 
 pid_t getTId() XRAY_NEVER_INSTRUMENT {
-  thread_local pid_t TId = syscall(SYS_gettid);
+	thread_local pid_t TId =
+#ifndef _WIN32
+		syscall(SYS_gettid);
+#else
+		GetCurrentThreadId();
+#endif
   return TId;
 }
 
-int getGlobalFd() XRAY_NEVER_INSTRUMENT {
-  static int Fd = __xray_OpenLogFile();
+FileDescription getGlobalFd() XRAY_NEVER_INSTRUMENT {
+  static FileDescription Fd = __xray_OpenLogFile();
   return Fd;
 }
 
@@ -129,8 +137,8 @@ template <class RDTSC>
 void __xray_InMemoryRawLog(int32_t FuncId, XRayEntryType Type,
                            RDTSC ReadTSC) XRAY_NEVER_INSTRUMENT {
   auto &InMemoryBuffer = getThreadLocalBuffer();
-  int Fd = getGlobalFd();
-  if (Fd == -1)
+  FileDescription Fd = getGlobalFd();
+  if (Fd == FileDescription(-1))
     return;
   thread_local __xray::ThreadExitFlusher Flusher(
       Fd, reinterpret_cast<__xray::XRayRecord *>(InMemoryBuffer), Offset);
@@ -167,8 +175,8 @@ void __xray_InMemoryRawLogWithArg(int32_t FuncId, XRayEntryType Type,
                                   uint64_t Arg1,
                                   RDTSC ReadTSC) XRAY_NEVER_INSTRUMENT {
   auto &InMemoryBuffer = getThreadLocalBuffer();
-  int Fd = getGlobalFd();
-  if (Fd == -1)
+  FileDescription Fd = getGlobalFd();
+  if (Fd == FileDescription(-1))
     return;
 
   // First we check whether there's enough space to write the data consecutively
@@ -220,13 +228,10 @@ void __xray_InMemoryEmulateTSC(int32_t FuncId,
                                XRayEntryType Type) XRAY_NEVER_INSTRUMENT {
   __xray_InMemoryRawLog(FuncId, Type, [](uint8_t &CPU) XRAY_NEVER_INSTRUMENT {
     timespec TS;
-    int result = clock_gettime(CLOCK_REALTIME, &TS);
-    if (result != 0) {
-      Report("clock_gettimg(2) return %d, errno=%d.", result, int(errno));
-      TS = {0, 0};
-    }
+    
+	auto now = std::chrono::system_clock::now().time_since_epoch();
     CPU = 0;
-    return TS.tv_sec * __xray::NanosecondsPerSecond + TS.tv_nsec;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
   });
 }
 
@@ -239,14 +244,10 @@ void __xray_InMemoryRawLogWithArgEmulateTSC(
     int32_t FuncId, XRayEntryType Type, uint64_t Arg1) XRAY_NEVER_INSTRUMENT {
   __xray_InMemoryRawLogWithArg(
       FuncId, Type, Arg1, [](uint8_t &CPU) XRAY_NEVER_INSTRUMENT {
-        timespec TS;
-        int result = clock_gettime(CLOCK_REALTIME, &TS);
-        if (result != 0) {
-          Report("clock_gettimg(2) return %d, errno=%d.", result, int(errno));
-          TS = {0, 0};
-        }
+        
         CPU = 0;
-        return TS.tv_sec * __xray::NanosecondsPerSecond + TS.tv_nsec;
+	  auto now = std::chrono::system_clock::now().time_since_epoch();
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
       });
 }
 

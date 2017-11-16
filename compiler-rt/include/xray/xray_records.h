@@ -61,7 +61,7 @@ struct alignas(32) XRayFileHeader {
 
     struct FdrAdditionalHeaderData FdrData;
   };
-} __attribute__((packed));
+} ;
 
 static_assert(sizeof(XRayFileHeader) == 32, "XRayFileHeader != 32 bytes");
 
@@ -97,7 +97,7 @@ struct alignas(32) XRayRecord {
 
   // Use some bytes in the end of the record for buffers.
   char Buffer[4] = {};
-} __attribute__((packed));
+} ;
 
 static_assert(sizeof(XRayRecord) == 32, "XRayRecord != 32 bytes");
 
@@ -123,7 +123,7 @@ struct alignas(32) XRayArgPayload {
 
   // The rest of this record ought to be left as padding.
   uint8_t TailPadding[8] = {};
-} __attribute__((packed));
+} ;
 
 static_assert(sizeof(XRayArgPayload) == 32, "XRayArgPayload != 32 bytes");
 

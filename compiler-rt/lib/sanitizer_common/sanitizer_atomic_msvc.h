@@ -240,6 +240,19 @@ INLINE bool atomic_compare_exchange_strong(volatile atomic_uint32_t *a,
   return false;
 }
 
+INLINE bool atomic_compare_exchange_strong(volatile atomic_sint32_t *a,
+                                           s32 *cmp,
+                                           s32 xchg,
+                                           memory_order mo) {
+  s32 cmpv = *cmp;
+  s32 prev = (s32)_InterlockedCompareExchange(
+      (volatile long*)&a->val_dont_use, (long)xchg, (long)cmpv);
+  if (prev == cmpv)
+    return true;
+  *cmp = prev;
+  return false;
+}
+
 INLINE bool atomic_compare_exchange_strong(volatile atomic_uint64_t *a,
                                            u64 *cmp,
                                            u64 xchg,

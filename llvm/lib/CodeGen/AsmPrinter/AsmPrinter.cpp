@@ -82,6 +82,7 @@
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSectionMachO.h"
+#include "llvm/MC/MCSectionCOFF.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCSymbol.h"
@@ -2840,7 +2841,13 @@ void AsmPrinter::emitXRayTable() {
                                          SectionKind::getReadOnlyWithRel());
     FnSledIndex = OutContext.getMachOSection("__DATA", "xray_fn_idx", 0,
                                              SectionKind::getReadOnlyWithRel());
-  } else {
+  }
+  else if (MF->getSubtarget().getTargetTriple().isOSBinFormatCOFF()) {
+	InstMap = OutContext.getCOFFSection("xray_instr_map", 0, SectionKind::getReadOnlyWithRel());
+
+    FnSledIndex = OutContext.getCOFFSection("xray_fn_idx", 0,
+                                             SectionKind::getReadOnlyWithRel());
+  }else {
     llvm_unreachable("Unsupported target");
   }
 

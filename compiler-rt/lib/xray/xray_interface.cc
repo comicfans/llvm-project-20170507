@@ -19,14 +19,18 @@
 #include <cstdio>
 #include <errno.h>
 #include <limits>
+#ifndef _WIN32
 #include <sys/mman.h>
+#else
+#include <windows.h>
+#endif
 
 #include "sanitizer_common/sanitizer_common.h"
 #include "xray_defs.h"
 
 namespace __xray {
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(_WIN32)
 // FIXME: The actual length is 11 bytes. Why was length 12 passed to mprotect()
 // ?
 static const int16_t cSledLength = 12;
@@ -74,16 +78,30 @@ public:
         MustCleanup(false) {}
 
   int MakeWriteable() XRAY_NEVER_INSTRUMENT {
+#ifndef _WIN32
     auto R = mprotect(PageAlignedAddr, MProtectLen,
                       PROT_READ | PROT_WRITE | PROT_EXEC);
     if (R != -1)
       MustCleanup = true;
     return R;
+#else
+	DWORD old;
+	BOOL ok = VirtualProtect(PageAlignedAddr,MProtectLen,PAGE_EXECUTE_READWRITE,&old);
+	MustCleanup = ok;
+
+	return ok?1:-1;
+
+#endif
   }
 
   ~MProtectHelper() XRAY_NEVER_INSTRUMENT {
     if (MustCleanup) {
+#ifndef _WIN32
       mprotect(PageAlignedAddr, MProtectLen, PROT_READ | PROT_EXEC);
+#else
+	  DWORD old;
+	  VirtualProtect(PageAlignedAddr, MProtectLen, PAGE_EXECUTE_READ,&old);
+#endif
     }
   }
 };

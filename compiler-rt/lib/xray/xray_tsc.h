@@ -17,7 +17,7 @@ namespace __xray {
 static constexpr uint64_t NanosecondsPerSecond = 1000ULL * 1000 * 1000;
 }
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(_WIN32)
 #include "xray_x86_64.inc"
 #elif defined(__powerpc64__)
 #include "xray_powerpc64.inc"

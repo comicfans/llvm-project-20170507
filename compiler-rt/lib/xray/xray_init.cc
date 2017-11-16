@@ -13,8 +13,6 @@
 //===----------------------------------------------------------------------===//
 
 #include <fcntl.h>
-#include <strings.h>
-#include <unistd.h>
 
 #include "sanitizer_common/sanitizer_common.h"
 #include "xray_defs.h"
@@ -23,10 +21,10 @@
 
 extern "C" {
 void __xray_init();
-extern const XRaySledEntry __start_xray_instr_map[] __attribute__((weak));
-extern const XRaySledEntry __stop_xray_instr_map[] __attribute__((weak));
-extern const XRayFunctionSledIndex __start_xray_fn_idx[] __attribute__((weak));
-extern const XRayFunctionSledIndex __stop_xray_fn_idx[] __attribute__((weak));
+extern const __declspec(selectany) XRaySledEntry __start_xray_instr_map[] ;
+extern const __declspec(selectany) XRaySledEntry __stop_xray_instr_map[] ;
+extern const __declspec(selectany) XRayFunctionSledIndex __start_xray_fn_idx[] ;
+extern const __declspec(selectany) XRayFunctionSledIndex __stop_xray_fn_idx[] ;
 }
 
 using namespace __xray;

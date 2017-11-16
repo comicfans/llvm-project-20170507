@@ -12,7 +12,11 @@
 //===----------------------------------------------------------------------===//
 
 #include <cstdint>
+#ifndef _WIN32
 #include <x86intrin.h>
+#else
+#include <intrin.h>
+#endif
 
 #include "sanitizer_common/sanitizer_internal_defs.h"
 #include "xray_defs.h"

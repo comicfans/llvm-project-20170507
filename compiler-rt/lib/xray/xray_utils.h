@@ -18,23 +18,34 @@
 #include <sys/types.h>
 #include <utility>
 
+#ifdef _WIN32
+typedef __int64 ssize_t;
+#include <windows.h>
+#endif
+
 namespace __xray {
+
+#ifndef _WIN32
+	typedef int FileDescription;
+#else
+	typedef HANDLE FileDescription;
+#endif
 
 // Default implementation of the reporting interface for sanitizer errors.
 void printToStdErr(const char *Buffer);
 
 // EINTR-safe write routine, provided a file descriptor and a character range.
-void retryingWriteAll(int Fd, char *Begin, char *End);
+void retryingWriteAll(FileDescription Fd, char *Begin, char *End);
 
 // Reads a long long value from a provided file.
 bool readValueFromFile(const char *Filename, long long *Value);
 
 // EINTR-safe read routine, providing a file descriptor and a character range.
-std::pair<ssize_t, bool> retryingReadSome(int Fd, char *Begin, char *End);
+std::pair<ssize_t, bool> retryingReadSome(FileDescription Fd, char *Begin, char *End);
 
 // EINTR-safe open routine, uses flag-provided values for initialising a log
 // file.
-int getLogFD();
+FileDescription getLogFD();
 
 } // namespace __xray
 

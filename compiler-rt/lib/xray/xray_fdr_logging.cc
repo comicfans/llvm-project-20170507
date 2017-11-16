@@ -15,11 +15,9 @@
 //
 //===----------------------------------------------------------------------===//
 #include "xray_fdr_logging.h"
-#include <sys/syscall.h>
-#include <sys/time.h>
 #include <errno.h>
 #include <time.h>
-#include <unistd.h>
+#include <chrono>
 
 #include "sanitizer_common/sanitizer_atomic.h"
 #include "sanitizer_common/sanitizer_common.h"
@@ -74,14 +72,14 @@ XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
   //      (fixed-sized) and let the tools reading the buffers deal with the data
   //      afterwards.
   //
-  int Fd = -1;
+  FileDescription Fd = FileDescription(-1);
   {
     __sanitizer::SpinMutexLock Guard(&FDROptionsMutex);
     Fd = FDROptions.Fd;
   }
-  if (Fd == -1)
+  if (Fd == FileDescription(-1))
     Fd = getLogFD();
-  if (Fd == -1) {
+  if (Fd == FileDescription(-1)) {
     auto Result = XRayLogFlushStatus::XRAY_LOG_NOT_FLUSHING;
     __sanitizer::atomic_store(&LogFlushStatus, Result,
                               __sanitizer::memory_order_release);
@@ -108,17 +106,17 @@ XRayLogFlushStatus fdrLoggingFlush() XRAY_NEVER_INSTRUMENT {
   LocalBQ->apply([&](const BufferQueue::Buffer &B) {
     uint64_t BufferSize = B.Size;
     if (BufferSize > 0) {
-      retryingWriteAll(Fd, reinterpret_cast<char *>(B.Buffer),
-                       reinterpret_cast<char *>(B.Buffer) + B.Size);
+      retryingWriteAll(Fd, reinterpret_cast<char *>(B.Data),
+                       reinterpret_cast<char *>(B.Data) + B.Size);
     }
   });
 
   // The buffer for this particular thread would have been finalised after
   // we've written everything to disk, and we'd lose the thread's trace.
   auto &TLD = __xray::__xray_fdr_internal::getThreadLocalData();
-  if (TLD.Buffer.Buffer != nullptr) {
+  if (TLD.Buffer.Data!= nullptr) {
     __xray::__xray_fdr_internal::writeEOBMetadata();
-    auto Start = reinterpret_cast<char *>(TLD.Buffer.Buffer);
+    auto Start = reinterpret_cast<char *>(TLD.Buffer.Data);
     retryingWriteAll(Fd, Start, Start + TLD.Buffer.Size);
   }
 
@@ -190,16 +188,18 @@ static TSCAndCPU getTimestamp() XRAY_NEVER_INSTRUMENT {
     Result.TSC = __xray::readTSC(Result.CPU);
   } else {
     // FIXME: This code needs refactoring as it appears in multiple locations
-    timespec TS;
-    int result = clock_gettime(CLOCK_REALTIME, &TS);
-    if (result != 0) {
-      Report("clock_gettime(2) return %d, errno=%d", result, int(errno));
-      TS = {0, 0};
-    }
     Result.CPU = 0;
-    Result.TSC = TS.tv_sec * __xray::NanosecondsPerSecond + TS.tv_nsec;
+	auto now = std::chrono::system_clock::now().time_since_epoch();
+    Result.TSC = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
   }
   return Result;
+}
+
+int defaultWallClockReader(timespec *ts) {
+	auto now = std::chrono::system_clock::now().time_since_epoch();
+	ts->tv_sec = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+	ts->tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(now - std::chrono::seconds(ts->tv_sec)).count();
+	return 0;
 }
 
 void fdrLoggingHandleArg0(int32_t FuncId,
